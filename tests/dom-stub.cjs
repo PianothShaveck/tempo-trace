@@ -71,6 +71,7 @@ function createDOM(html) {
   }
   document.getElementById = id => {if (!ids.has(id)) throw new Error('Missing HTML control #' + id); return ids.get(id);};
   document.createElement = tag => {const node = new Element(tag); node.ownerDocument = document; return node;};
+  document.createElementNS = (namespace, tag) => Object.assign(document.createElement(tag), {namespaceURI: namespace});
   document.createTextNode = text => Object.assign(document.createElement('text'), {textContent: text});
   document.body = document.querySelector('body'); document.activeElement = document.body;
   for (const select of document.querySelectorAll('select')) select.value = (select.children.find(n => 'selected' in n.attributes) || select.children[0])?.value || '';

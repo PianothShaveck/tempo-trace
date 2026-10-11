@@ -14,6 +14,7 @@
   let renderFrame = 0, playbackFrame = 0, previousUiTime = 0, page = 0, relinkRequested = false;
   let confirmation = null, fallbackId = 0, autosaveFailed = false;
   let analysisWorker=null, workerDisabled=false, workerRunning=false, workerPending=null, analysisRevision=0, analysisBusy=false;
+  let currentFile=null,detectionController=null,detectionResult=null,detectionRunning=false,detectionGeneration=0,editRevision=0;
   const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
   const number = v => typeof v === 'number' && Number.isFinite(v);
   const bpm = v => number(v) ? v.toLocaleString('it-IT', {maximumFractionDigits: 1}) : '—';
@@ -74,7 +75,9 @@
     clearTimeout(savedTimer); $('saveStatus').textContent = 'Salvataggio…'; savedTimer = setTimeout(persist, 350);
   }
   function changed() {
+    editRevision++;
     state.beats.sort((a,b) => a.time-b.time);
+    clickTrack?.setBeats(state.beats);
     computeAnalysis();
     render(); scheduleSave();
   }
@@ -111,6 +114,7 @@
   const callbacks = {onSeek: time => seekTo(time), onSelectBeat: id => selectBeat(id), onMoveBeat: (id,time) => moveBeat(id, time)};
   const chart = TempoCharts.createTempoChart($('tempoChart'), callbacks);
   const wave = TempoCharts.createWaveform($('waveform'), callbacks);
+  const clickTrack=globalThis.TempoClicks?.create(media);
 
   function renderCharts() { const data = graphState(); chart.render(data); wave.render(data); }
   function requestChartRender() {
@@ -129,6 +133,8 @@
     $('relinkButton').textContent=state.media.demo?'Riapri esempio':'Collega file';
     $('relinkText').textContent=state.media.demo?'Rigenera l’audio dell’esempio.':'Riapri il file per ascoltare questa sessione.';
     $('playButton').disabled = !hasMedia; $('auditionBeat').disabled = !hasMedia;
+    $('detectButton').disabled=!currentFile || detectionRunning;
+    $('clickTrackButton').disabled=!hasMedia || !state.beats.length;
     $('tapButton').disabled = !state.duration;
     $('duration').textContent = '/ ' + formatTime(state.duration);
     $('seek').max = String(extent());
@@ -137,14 +143,14 @@
     $('lastBpm').replaceChildren(document.createTextNode(bpm(selectedInterval?.bpm) + ' '), Object.assign(document.createElement('small'), {textContent: 'BPM'}));
     $('statStart').textContent = bpm(analysis.stats.start); $('statMean').textContent = bpm(analysis.stats.mean); $('statEnd').textContent = bpm(analysis.stats.end);
     $('statRange').textContent = number(analysis.stats.min) ? `${Math.round(analysis.stats.min)}–${Math.round(analysis.stats.max)}` : '—';
-    $('statStart').parentElement.dataset.tip = 'Mediana di fino a 5 intervalli tra i primi 7. Esclude le fermate; riduce l’effetto dei tap segnalati.';
-    $('statEnd').parentElement.dataset.tip = 'Mediana di fino a 5 intervalli tra gli ultimi 7. Esclude le fermate; riduce l’effetto dei tap segnalati.';
+    $('statStart').parentElement.dataset.tip = 'Mediana dei primi intervalli, escluse le fermate.';
+    $('statEnd').parentElement.dataset.tip = 'Mediana degli ultimi intervalli, escluse le fermate.';
     $('statMean').parentElement.dataset.tip = 'Pulsazioni totali / tempo coperto. Include i tap segnalati; esclude le interruzioni.';
     $('statRange').parentElement.dataset.tip = 'Minimo e massimo dei BPM grezzi, inclusi i tap segnalati.';
     $('unitBadge').textContent = ({'.5': '♪', '0.5':'♪', '1':'♩', '1.5':'♩.', '2':'𝅗𝅥'}[state.options.beatUnit] || '♩') + ' = 1 tap';
     $('chartEmpty').hidden = analysis.intervals.length > 0;
     if (state.beats.length && !analysis.intervals.length) $('chartEmpty').textContent = 'Aggiungi un altro beat nello stesso tratto.';
-    else if (!state.beats.length) $('chartEmpty').innerHTML = 'Premi <kbd>P</kbd> per ascoltare, <kbd>spazio</kbd> a ogni beat.';
+    else if (!state.beats.length) $('chartEmpty').innerHTML = 'Rileva i beat o marca con <kbd>spazio</kbd>.';
     $('undoButton').disabled = !undoStack.length; $('redoButton').disabled = !redoStack.length;
     $('clearButton').disabled = !state.beats.length; $('beatListButton').disabled = !state.beats.length;
     $('saveBeats').disabled = !state.beats.length || analysisBusy; $('saveSections').disabled = !analysis.sections.length || analysisBusy; $('saveSvg').disabled = !analysis.intervals.length || analysisBusy;
@@ -166,21 +172,25 @@
     });
   }
   function renderAnomalies() {
-    $('anomalyCount').textContent = String(analysis.anomalies.length);
+    const marked=new Set(analysis.anomalies.map(i=>i.beatId));
+    const weak=state.beats.filter(b=>b.source==='auto' && b.confidence<.45 && !marked.has(b.id));
+    const issues=[...analysis.anomalies,...weak.map(b=>({beatId:b.id,end:b.time,anomaly:b.inferred?'Beat interpolato':'Rilevamento debole',bpm:null}))].sort((a,b)=>a.end-b.end);
+    $('anomalyCount').textContent = String(issues.length);
     const list = $('anomalyList'); list.replaceChildren();
-    if (!analysis.anomalies.length) { list.append(Object.assign(document.createElement('p'), {className:'empty-note',textContent:'Nessun intervallo insolito rilevato.'})); return; }
-    analysis.anomalies.slice(0, 250).forEach(interval => {
+    if (!issues.length) { list.append(Object.assign(document.createElement('p'), {className:'empty-note',textContent:'Nessuna segnalazione.'})); return; }
+    issues.slice(0, 250).forEach(interval => {
       const button = Object.assign(document.createElement('button'), {className:'anomaly-row'});
-      button.append(Object.assign(document.createElement('strong'), {textContent:formatTime(interval.end,true)}),Object.assign(document.createElement('span'), {textContent:interval.anomaly}),Object.assign(document.createElement('span'), {textContent:bpm(interval.bpm)+' BPM'}));
+      button.append(Object.assign(document.createElement('strong'), {textContent:formatTime(interval.end,true)}),Object.assign(document.createElement('span'), {textContent:interval.anomaly}),Object.assign(document.createElement('span'), {textContent:number(interval.bpm)?bpm(interval.bpm)+' BPM':''}));
       button.addEventListener('click', () => { selectBeat(interval.beatId, true); seekTo(interval.end); $('beatTime').focus({preventScroll:false}); }); list.append(button);
     });
-    if (analysis.anomalies.length > 250) list.append(Object.assign(document.createElement('p'), {className:'empty-note',textContent:'Prime 250 segnalazioni. Tutte sono disponibili nel CSV.'}));
+    if (issues.length > 250) list.append(Object.assign(document.createElement('p'), {className:'empty-note',textContent:'Prime 250 · elenco completo nel CSV.'}));
   }
   function renderEditor() {
     const index = state.beats.findIndex(b => b.id === state.selectedId); const beat = state.beats[index];
     $('editorEmpty').hidden = !!beat; $('beatEditor').hidden = !beat; $('selectedNumber').textContent = beat ? String(index+1) : '—';
     $('previousBeat').disabled = index <= 0; $('nextBeat').disabled = !state.beats.length || index >= state.beats.length-1;
     if (!beat) return;
+    $('confirmBeat').hidden=beat.source!=='auto';
     $('beatTime').value = beat.time.toFixed(3); $('beatTime').max = String(extent());
     $('breakBefore').checked = !!beat.breakBefore; $('breakBefore').disabled = index === 0;
     $('fermataBefore').checked=!!beat.fermataBefore; $('fermataBefore').disabled=index===0 || !!beat.breakBefore;
@@ -259,7 +269,7 @@
     if (state.beats.some(b=>Math.abs(b.time-time)<.035)) return toast('C’è già un beat qui. Selezionalo per correggerlo.');
     checkpoint();
     const tail=state.beats.at(-1);
-    const beat={id:uid(),time,breakBefore:!!(pendingBreak && tail && time>tail.time)};
+    const beat={id:uid(),time,breakBefore:!!(pendingBreak && tail && time>tail.time),source:'manual'};
     state.beats.push(beat); state.selectedId=beat.id; lastTapId=beat.id; pendingBreak=false;
     if (time>viewEnd || time<viewStart) { const span=viewEnd-viewStart; viewStart=clamp(time-span*.65,0,Math.max(0,extent()-span)); viewEnd=viewStart+span; }
     $('tapButton').classList.remove('pulse'); void $('tapButton').offsetWidth; $('tapButton').classList.add('pulse');
@@ -273,7 +283,7 @@
     const upper=index<state.beats.length-1 ? state.beats[index+1].time-.001 : extent();
     if (next<lower-.00001 || next>upper+.00001) { toast('Mantieni il beat tra i due vicini e dentro la registrazione.',true); renderEditor(); requestChartRender(); return; }
     if (Math.abs(state.beats[index].time-next)<.000001) return;
-    media.pause(); checkpoint(); state.beats[index].time=next; state.selectedId=id; changed();
+    media.pause(); checkpoint(); state.beats[index].time=next; state.beats[index].source='manual'; delete state.beats[index].confidence; delete state.beats[index].inferred; state.selectedId=id; changed();
   }
   function removeSelected() {
     const index=state.beats.findIndex(b=>b.id===state.selectedId); if (index<0) return;
@@ -294,7 +304,10 @@
       const time=Math.round(b.time*1000)/1000;
       if (times.has(time)) throw new Error('Il progetto contiene beat duplicati.'); times.add(time);
       const id=typeof b.id==='string' && b.id.length<100 && !ids.has(b.id) ? b.id : uid(); ids.add(id);
-      return {id,time,breakBefore:b.breakBefore===true,fermataBefore:b.fermataBefore===true && b.breakBefore!==true};
+      const beat={id,time,breakBefore:b.breakBefore===true,fermataBefore:b.fermataBefore===true && b.breakBefore!==true};
+      if(b.source==='auto'){if(!number(b.confidence)||b.confidence<0||b.confidence>1||(b.inferred!=null&&typeof b.inferred!=='boolean'))throw new Error('Dati del rilevamento non validi.');beat.source='auto';beat.confidence=b.confidence;beat.inferred=b.inferred===true;}
+      else if(b.source==='manual')beat.source='manual';
+      return beat;
     }).sort((a,b)=>a.time-b.time);
     const options={...DEFAULTS};
     if (data.options!=null && (typeof data.options!=='object' || Array.isArray(data.options))) throw new Error('Impostazioni del progetto non valide.');
@@ -307,6 +320,7 @@
     return {beats,options,duration:data.duration,selectedId:null,media:{name:data.media.name,size:number(data.media.size)?data.media.size:0,type:typeof data.media.type==='string'?data.media.type:'',kind:data.media.kind==='video'?'video':'audio',demo:data.media.demo===true}};
   }
   function unloadMedia() {
+    cancelDetection(); currentFile=null;globalThis.TempoDetectionClient?.clear();clickTrack?.reset();
     media.pause(); hasMedia=false; media.removeAttribute('src'); media.load(); media.hidden=true;
     if (sourceURL) URL.revokeObjectURL(sourceURL); sourceURL=null; peaks=null;
   }
@@ -344,7 +358,7 @@
         const ok=await confirmAction('Apri una nuova esecuzione', 'I tap attuali verranno sostituiti. Esporta prima il progetto se vuoi conservarli.');
         if (!ok || token!==loadToken) { URL.revokeObjectURL(url); return; }
       }
-      unloadMedia(); sourceURL=url;
+      unloadMedia(); sourceURL=url;currentFile=file;
       const isVideo=file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|m4v)$/i.test(file.name);
       if (!relink) {
         state={beats:demoData?.beats || [],options:{...DEFAULTS},duration,selectedId:null,media:null};
@@ -363,35 +377,27 @@
       media.load(); hasMedia=media.readyState>=1;
       if (demoData) { peaks=demoData.peaks; $('waveStatus').textContent=''; }
       else { peaks=null; $('waveStatus').textContent='Lettura della forma d’onda…'; }
-      changed(); toast(relink?'File collegato. Tap conservati.':'File pronto. P per ascoltare, spazio per i beat.');
+      changed(); if(relink)toast('File collegato.');
       // Waveform generation is optional. The original file remains the player source.
       if (!demoData) decodePeaks(file, token, duration);
     } catch(error) { URL.revokeObjectURL(url); if (token===loadToken) toast(error.message || 'Impossibile aprire il file.',true); }
   }
   async function decodePeaks(file, token, duration) {
     if (file.size>100*1024*1024 || duration>1800) { $('waveStatus').textContent='Forma d’onda omessa · file lungo'; return; }
-    const AudioCtx=window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) { $('waveStatus').textContent='Forma d’onda non disponibile'; return; }
-    let context;
     try {
-      // Low-rate decode is for the overview only; playback uses the original.
-      // It keeps a long stereo waveform well below full-rate PCM memory use.
-      context=new AudioCtx({sampleRate:8000}); const bytes=await file.arrayBuffer();
-      if (token!==loadToken) return;
-      const decoded=await context.decodeAudioData(bytes);
+      const decoded=await TempoDetectionClient.decode(file,duration);
       if (token!==loadToken) return;
       const count=Math.min(16000,Math.max(1500,Math.ceil(duration*65))), output=new Float32Array(count);
-      const stride=Math.max(1,Math.floor(decoded.length/count)); let maximum=0;
-      const channels=Array.from({length:Math.min(decoded.numberOfChannels,2)},(_,i)=>decoded.getChannelData(i));
+      const stride=Math.max(1,Math.floor(decoded.samples.length/count)); let maximum=0;
+      const channels=[decoded.samples];
       for (let bin=0;bin<count;bin++) {
-        let peak=0; const start=bin*stride, end=Math.min(decoded.length,start+stride), sampleStep=Math.max(1,Math.floor(stride/100));
+        let peak=0; const start=bin*stride, end=Math.min(decoded.samples.length,start+stride), sampleStep=Math.max(1,Math.floor(stride/100));
         for (const channel of channels) for (let i=start;i<end;i+=sampleStep) peak=Math.max(peak,Math.abs(channel[i]));
         output[bin]=peak; maximum=Math.max(maximum,peak);
       }
       if (maximum) for(let i=0;i<output.length;i++) output[i]/=maximum;
       peaks=output; $('waveStatus').textContent=''; requestChartRender();
     } catch { if (token===loadToken) $('waveStatus').textContent='Forma d’onda non disponibile · tap attivi'; }
-    finally { if (context) context.close().catch(()=>{}); }
   }
 
   async function loadProject(file) {
@@ -415,12 +421,101 @@
     const intervals=new Map(analysis.intervals.map(i=>[i.beatId,i])); $('beatTable').replaceChildren();
     state.beats.slice(page*pageSize,(page+1)*pageSize).forEach((beat,index)=>{
       const interval=intervals.get(beat.id), row=document.createElement('tr');
-      for (const value of [String(page*pageSize+index+1),formatTime(beat.time,true),bpm(interval?.bpm),beat.breakBefore?'Interruzione':interval?.anomaly || '—']) row.append(Object.assign(document.createElement('td'),{textContent:value}));
+      for (const value of [String(page*pageSize+index+1),formatTime(beat.time,true),bpm(interval?.bpm),beat.breakBefore?'Interruzione':interval?.anomaly || (beat.source==='auto'?(beat.confidence<.45?'Auto · da rivedere':'Auto'):'—')]) row.append(Object.assign(document.createElement('td'),{textContent:value}));
       const cell=document.createElement('td'), button=Object.assign(document.createElement('button'),{className:'text-button',textContent:'Modifica'});
       button.setAttribute('aria-label',`Modifica beat ${page*pageSize+index+1}`);
       button.addEventListener('click',()=>{ $('beatListDialog').close(); selectBeat(beat.id,true); $('beatTime').focus(); }); cell.append(button); row.append(cell); $('beatTable').append(row);
     });
     $('prevPage').disabled=page===0; $('nextPage').disabled=page===pageCount-1; $('pageLabel').textContent=`${page+1} / ${pageCount}`;
+  }
+
+  function cancelDetection(){
+    detectionGeneration++;detectionController?.abort();detectionController=null;detectionRunning=false;detectionResult=null;
+    $('detectProgress').hidden=true;$('detectRun').disabled=false;$('detectOptions').hidden=false;
+    $('detectApply').hidden=true;$('detectResult').hidden=true;
+    $('detectButton').disabled=!currentFile;
+  }
+  function openDetection(){
+    if(!currentFile)return toast('Collega il file originale.');
+    media.pause();cancelDetection();$('detectError').hidden=true;$('detectRun').textContent='Rileva';
+    const manual=state.beats.filter(b=>b.source!=='auto');
+    $('detectAnchors').disabled=!manual.length;$('detectAnchors').checked=!!manual.length;
+    $('detectUnitNote').textContent='BPM della pulsazione rilevata · '+$('unitBadge').textContent.replace('tap','beat');
+    showDialog('detectDialog');
+  }
+  async function runDetection(){
+    if(!currentFile || detectionRunning)return;
+    const minBpm=Number($('detectMin').value),maxBpm=Number($('detectMax').value),hint=$('detectHint').value.trim();
+    const preferredBpm=hint?Number(hint):null;
+    const start=$('detectScope').value==='view'?viewStart:0,end=$('detectScope').value==='view'?Math.min(viewEnd,state.duration):state.duration;
+    const preserveManual=$('detectAnchors').checked&&!$('detectAnchors').disabled;
+    const anchors=preserveManual?state.beats.filter(b=>b.source!=='auto' && b.time>=start && b.time<=end):[];
+    $('detectError').hidden=true;
+    if(!number(minBpm)||!number(maxBpm)||minBpm<25||maxBpm>300||minBpm>=maxBpm || (preferredBpm!==null&&(!number(preferredBpm)||preferredBpm<minBpm||preferredBpm>maxBpm))){
+      $('detectError').textContent='Controlla l’intervallo BPM e il tempo indicativo.';$('detectError').hidden=false;return;
+    }
+    if(end-start<4){$('detectError').textContent='Seleziona almeno 4 secondi.';$('detectError').hidden=false;return;}
+    detectionController=new AbortController();const generation=++detectionGeneration,token=loadToken,revision=editRevision;
+    detectionRunning=true;detectionResult=null;$('detectOptions').hidden=true;$('detectProgress').hidden=false;
+    $('detectRun').disabled=true;$('detectResult').hidden=true;$('detectApply').hidden=true;$('detectButton').disabled=true;
+    $('detectionProgress').value=0;$('detectStage').textContent='Decodifica…';
+    try {
+      const result=await TempoDetectionClient.run(currentFile,state.duration,{minBpm,maxBpm,preferredBpm,anchors,start,end},update=>{
+        if(generation!==detectionGeneration)return;
+        const progress=clamp(update.progress||0,0,1);$('detectionProgress').value=progress;
+        const labels={onsets:'Attacchi',features:'Attacchi',tempo:'Tempo',tracking:'Beat',beats:'Beat',complete:'Completato',done:'Completato'};
+        $('detectStage').textContent=(labels[update.stage]||update.stage||'Analisi')+' · '+Math.round(progress*100)+'%';
+      },detectionController.signal);
+      if(generation!==detectionGeneration || token!==loadToken || revision!==editRevision)return;
+      if(!result.beats.length)throw new Error('Nessuna pulsazione rilevata. Prova un altro intervallo BPM o alcuni tap manuali.');
+      detectionResult={result,start,end,preserveManual,revision,token};
+      $('detectionSummary').textContent=result.beats.length+' beat';
+      const weak=result.beats.filter(b=>b.confidence<.45).length;
+      $('detectionReview').textContent=weak?weak+' da rivedere':'';$('detectionReview').hidden=!weak;
+      drawDetectionPreview(result);$('detectResult').hidden=false;$('detectApply').hidden=false;$('detectRun').textContent='Riprova';
+    } catch(error){
+      if(generation===detectionGeneration && error.name!=='AbortError'){$('detectError').textContent=error.message||'Rilevamento non riuscito.';$('detectError').hidden=false;}
+    } finally {
+      if(generation===detectionGeneration){detectionRunning=false;detectionController=null;$('detectProgress').hidden=true;$('detectOptions').hidden=false;$('detectRun').disabled=false;$('detectButton').disabled=!currentFile;}
+    }
+  }
+  function drawDetectionPreview(result){
+    const svg=$('detectionPreview'), ns='http://www.w3.org/2000/svg';svg.replaceChildren();
+    const points=(result.diagnostics?.localTempo||[]).filter(p=>number(p.bpm)&&p.bpm>0&&number(p.time));
+    if(points.length<2){svg.hidden=true;return;}svg.hidden=false;
+    let min=Infinity,max=0;for(const p of points){min=Math.min(min,p.bpm);max=Math.max(max,p.bpm);}
+    const start=points[0].time,span=Math.max(.1,points.at(-1).time-start),range=Math.max(10,max-min);
+    const path=document.createElementNS(ns,'path');
+    const stride=Math.max(1,Math.floor(points.length/200));
+    path.setAttribute('d',points.filter((_,i)=>i%stride===0||i===points.length-1).map((p,i)=>`${i?'L':'M'}${(36+(p.time-start)/span*316).toFixed(1)} ${(61-(p.bpm-min)/range*48).toFixed(1)}`).join(' '));
+    path.setAttribute('fill','none');path.setAttribute('stroke','#69e1cb');path.setAttribute('stroke-width','2');svg.append(path);
+    for(const [label,y] of [[Math.round(max),15],[Math.round(min),64]]){const t=document.createElementNS(ns,'text');t.textContent=String(label);t.setAttribute('x','0');t.setAttribute('y',String(y));t.setAttribute('fill','#9daebb');t.setAttribute('font-size','10');svg.append(t);}
+  }
+  function applyDetection(){
+    const proposal=detectionResult;if(!proposal)return;
+    if(proposal.token!==loadToken || proposal.revision!==editRevision){cancelDetection();toast('La sessione è cambiata. Ripeti il rilevamento.',true);return;}
+    const {start,end,preserveManual,result}=proposal;
+    const kept=state.beats.filter(b=>b.time<start || b.time>end || (preserveManual&&b.source!=='auto')).map(b=>({...b}));
+    const guides=kept.filter(b=>b.time>=start&&b.time<=end).sort((a,b)=>a.time-b.time);
+    const sorted=result.beats.filter(b=>number(b.time)&&number(b.confidence)&&b.time>=start&&b.time<=end).sort((a,b)=>a.time-b.time);
+    const occupiedTimes=new Set(kept.map(b=>b.time));
+    const generated=[];let guideIndex=0;
+    for(const candidate of sorted){
+      while(guideIndex<guides.length && guides[guideIndex].time<candidate.time-.09)guideIndex++;
+      if(guides[guideIndex] && Math.abs(guides[guideIndex].time-candidate.time)<.09)continue;
+      const time=Math.round(candidate.time*1000)/1000;
+      if(occupiedTimes.has(time))continue;
+      if(generated.length&&time-generated.at(-1).time<.035)continue;
+      generated.push({id:uid(),time,source:'auto',confidence:clamp(candidate.confidence,0,1),inferred:!!candidate.inferred,breakBefore:!!candidate.breakBefore});
+    }
+    const combined=[...kept,...generated].sort((a,b)=>a.time-b.time);
+    if(combined.length>MAX_BEATS){$('detectError').textContent='Troppi beat. Restringi il tratto o l’intervallo BPM.';$('detectError').hidden=false;return;}
+    if(!generated.length){$('detectError').textContent='Nessun nuovo beat da aggiungere.';$('detectError').hidden=false;return;}
+    // A scoped replacement cannot imply continuity across the unanalysed edges.
+    if(start>0){const first=combined.findIndex(b=>b.time>=start);if(first>0)combined[first].breakBefore=true;}
+    if(end<state.duration){const after=combined.findIndex(b=>b.time>end);if(after>0)combined[after].breakBefore=true;}
+    checkpoint();state.beats=combined;state.selectedId=generated[0].id;lastTapId=null;pendingBreak=false;
+    $('detectDialog').close();changed();toast(generated.length+' beat aggiunti.');
   }
 
   function createDemo() {
@@ -457,6 +552,19 @@
   $('demoButton').addEventListener('click',()=>{const demo=createDemo();loadFile(demo.file,false,demo);});
   $('restoreButton').addEventListener('click',()=>{try {adoptProject(validateProject(JSON.parse(localStorage.getItem(STORAGE_KEY))));toast('Sessione ripristinata. Collega la registrazione originale.');} catch {toast('La sessione salvata non è leggibile.',true);}});
   $('helpButton').addEventListener('click',()=>showDialog('helpDialog'));
+  $('detectButton').addEventListener('click',openDetection);
+  $('detectForm').addEventListener('submit',e=>{e.preventDefault();if($('detectForm').reportValidity())runDetection();});
+  $('detectApply').addEventListener('click',applyDetection);
+  $('cancelDetection').addEventListener('click',cancelDetection);
+  $('detectDialog').addEventListener('close',cancelDetection);
+  for(const id of ['detectScope','detectMin','detectMax','detectHint','detectAnchors'])$(id).addEventListener('input',()=>{
+    if(detectionRunning)return;detectionResult=null;$('detectResult').hidden=true;$('detectApply').hidden=true;$('detectRun').textContent='Rileva';
+  });
+  $('clickTrackButton').addEventListener('click',async()=>{
+    if(!clickTrack)return toast('Click non disponibile.',true);
+    try{const active=await clickTrack.setEnabled(!clickTrack.enabled);$('clickTrackButton').setAttribute('aria-pressed',String(active));}
+    catch(error){toast(error.message||'Click non disponibile.',true);}
+  });
   $('playButton').addEventListener('click',togglePlay); $('restartButton').addEventListener('click',()=>seekTo(0));
   $('seek').addEventListener('input',e=>seekTo(Number(e.target.value)));
   $('speed').addEventListener('change',e=>{media.playbackRate=Number(e.target.value);media.preservesPitch=true;});
@@ -472,8 +580,9 @@
   $('beatTime').addEventListener('change',e=>{if(!e.target.value.trim()||!number(e.target.valueAsNumber)){toast('Inserisci una posizione valida in secondi.',true);renderEditor();return;}moveBeat(state.selectedId,e.target.valueAsNumber);});
   document.querySelectorAll('[data-nudge]').forEach(button=>button.addEventListener('click',()=>{const beat=state.beats.find(b=>b.id===state.selectedId);if(beat)moveBeat(beat.id,beat.time+Number(button.dataset.nudge));}));
   $('deleteBeat').addEventListener('click',removeSelected);
-  $('breakBefore').addEventListener('change',e=>{const beat=state.beats.find(b=>b.id===state.selectedId);if(beat){checkpoint();beat.breakBefore=e.target.checked;if(beat.breakBefore)beat.fermataBefore=false;changed();}});
-  $('fermataBefore').addEventListener('change',e=>{const beat=state.beats.find(b=>b.id===state.selectedId);if(beat){checkpoint();beat.fermataBefore=e.target.checked;changed();}});
+  $('confirmBeat').addEventListener('click',()=>{const beat=state.beats.find(b=>b.id===state.selectedId);if(beat){checkpoint();beat.source='manual';delete beat.confidence;delete beat.inferred;changed();}});
+  $('breakBefore').addEventListener('change',e=>{const beat=state.beats.find(b=>b.id===state.selectedId);if(beat){checkpoint();beat.source='manual';delete beat.confidence;delete beat.inferred;beat.breakBefore=e.target.checked;if(beat.breakBefore)beat.fermataBefore=false;changed();}});
+  $('fermataBefore').addEventListener('change',e=>{const beat=state.beats.find(b=>b.id===state.selectedId);if(beat){checkpoint();beat.source='manual';delete beat.confidence;delete beat.inferred;beat.fermataBefore=e.target.checked;if(beat.fermataBefore)beat.breakBefore=false;changed();}});
   $('auditionBeat').addEventListener('click',async()=>{const beat=state.beats.find(b=>b.id===state.selectedId);if(!beat||!hasMedia)return;seekTo(Math.max(0,beat.time-.5));try{await media.play();}catch{toast('Impossibile avviare la riproduzione.',true);}});
   $('settingsButton').addEventListener('click',()=>{for(const id of ['beatUnit','minSectionSeconds','smoothing'])$(id).value=state.options[id];$('sectionThreshold').value=Math.round(state.options.sectionThreshold*100);showDialog('settingsDialog');});
   $('settingsForm').addEventListener('submit',e=>{e.preventDefault();if(!$('settingsForm').reportValidity())return;checkpoint();state.options={beatUnit:Number($('beatUnit').value),sectionThreshold:Number($('sectionThreshold').value)/100,minSectionSeconds:Number($('minSectionSeconds').value),smoothing:Number($('smoothing').value)};$('settingsDialog').close();changed();});
@@ -482,7 +591,7 @@
   $('prevPage').addEventListener('click',()=>{page--;renderBeatTable();});$('nextPage').addEventListener('click',()=>{page++;renderBeatTable();});
   $('exportButton').addEventListener('click',()=>showDialog('exportDialog'));
   $('saveProject').addEventListener('click',exportProject);
-  $('saveBeats').addEventListener('click',()=>{const map=new Map(analysis.intervals.map(i=>[i.beatId,i]));download(csv([['beat','secondi','BPM_semiminima','tendenza_BPM','interruzione_prima','fermata_confermata','agogica','segnalazione'],...state.beats.map((b,i)=>{const interval=map.get(b.id);return[i+1,b.time.toFixed(3),interval?.bpm.toFixed(4),interval?.smoothed?.toFixed(4),b.breakBefore?'si':'no',b.fermataBefore?'si':'no',interval?.expressive||'',interval?.anomaly||''];})]),baseName()+'.beat.csv','text/csv;charset=utf-8');});
+  $('saveBeats').addEventListener('click',()=>{const map=new Map(analysis.intervals.map(i=>[i.beatId,i]));download(csv([['beat','secondi','BPM_semiminima','tendenza_BPM','interruzione_prima','fermata_confermata','agogica','segnalazione','origine','supporto_rilevamento','interpolato'],...state.beats.map((b,i)=>{const interval=map.get(b.id);return[i+1,b.time.toFixed(3),interval?.bpm.toFixed(4),interval?.smoothed?.toFixed(4),b.breakBefore?'si':'no',b.fermataBefore?'si':'no',interval?.expressive||'',interval?.anomaly||'',b.source||'manual',number(b.confidence)?b.confidence.toFixed(4):'',b.inferred?'si':'no'];})]),baseName()+'.beat.csv','text/csv;charset=utf-8');});
   $('saveSections').addEventListener('click',()=>download(csv([['sezione','inizio_secondi','fine_secondi','BPM_medio_semiminima','intervalli'],...analysis.sections.map((s,i)=>[i+1,s.start.toFixed(3),s.end.toFixed(3),s.bpm.toFixed(4),s.count])]),baseName()+'.sezioni.csv','text/csv;charset=utf-8'));
   $('saveSvg').addEventListener('click',()=>download(chart.exportSVG(),baseName()+'.grafico.svg','image/svg+xml'));
 

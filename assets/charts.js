@@ -6,6 +6,8 @@
   let chartSerial = 0;
   const finite = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+  const isAutomatic = beat => beat && beat.source === 'auto';
+  const isLowAutomatic = beat => isAutomatic(beat) && finite(beat.confidence) && Number(beat.confidence) < .45;
   const isHold = interval => interval && (interval.expressive === 'fermata' || interval.expressive === 'possible-fermata');
   const expressionNames = {accelerando:'Accelerando',rallentando:'Rallentando',fermata:'Fermata', 'possible-fermata':'Possibile fermata'};
   function node(tag, attrs, text) {
@@ -46,7 +48,7 @@
   function create(svg, callbacks, waveform) {
     callbacks = callbacks || {};
     const serial = ++chartSerial;
-    let state = {}, geometry = null, points = [], visibleBeats = [], anchors = [], intervalsByBeat = new Map(), drag = null, disposed = false;
+    let state = {}, geometry = null, points = [], visibleBeats = [], anchors = [], intervalsByBeat = new Map(), beatsById = new Map(), drag = null, disposed = false;
     let playhead = null, playheadDot = null, tooltip = null, tooltipText = null, tooltipBox = null, dragGhost = null;
     let resizeFrame = null, lastWidth = 0;
     const titleId = `tempo-chart-title-${serial}`, descriptionId = `tempo-chart-desc-${serial}`;
@@ -70,15 +72,26 @@
     function label(x,y,text,attrs) {
       return node('text',Object.assign({x,y,fill:palette.muted,'font-size':11,'font-family':'system-ui, sans-serif','font-variant-numeric':'tabular-nums'},attrs),text);
     }
-    function showTooltip(x,y,text) {
+    function showTooltip(x,y,text,detail) {
       if (!tooltip || !geometry) return;
-      const width = clamp(text.length * 6.6 + 20,90,geometry.width - 12);
+      const width = clamp(Math.max(text.length, (detail || '').length) * 6.6 + 20,90,geometry.width - 12);
       const left = clamp(x - width / 2,6,geometry.width - width - 6);
-      const top = y > 65 ? y - 42 : y + 18;
-      tooltip.setAttribute('transform', `translate(${left} ${clamp(top,4,geometry.height-34)})`);
-      tooltipBox.setAttribute('width',width);
       const maxCharacters = Math.max(10, Math.floor((width - 20) / 6.6));
-      tooltipText.textContent = text.length > maxCharacters ? text.slice(0, maxCharacters - 1) + '…' : text;
+      const lines=[text.length > maxCharacters ? text.slice(0, maxCharacters - 1) + '…' : text];
+      if (detail) {
+        let line='';
+        for (const word of detail.split(' ')) {
+          if (line && (line+' '+word).length>maxCharacters) { lines.push(line);line=word; }
+          else line+=(line?' ':'')+word;
+        }
+        if(line) lines.push(line);
+      }
+      const height=13+lines.length*16;
+      const top = y > height+26 ? y-height-12 : y+18;
+      tooltip.setAttribute('transform', `translate(${left} ${clamp(top,4,Math.max(4,geometry.height-height-4))})`);
+      tooltipBox.setAttribute('width',width);tooltipBox.setAttribute('height',height);
+      tooltipText.replaceChildren();
+      lines.forEach((line,index)=>tooltipText.append(node('tspan',{x:10,y:19+index*16,fill:index?palette.violet:palette.text},line)));
       tooltip.setAttribute('visibility','visible');
     }
     function hideTooltip() { if (tooltip) tooltip.setAttribute('visibility','hidden'); }
@@ -95,6 +108,7 @@
     function render(nextState) {
       if (disposed) return;
       state = nextState || {};
+      beatsById = waveform ? new Map() : new Map((state.beats || []).map(beat => [String(beat.id),beat]));
       const rect = svg.getBoundingClientRect();
       const width = Math.max(waveform ? 120 : 320, Math.round(rect.width || svg.clientWidth || 1100));
       lastWidth = Math.round(rect.width);
@@ -124,7 +138,7 @@
       svg.setAttribute('preserveAspectRatio','xMidYMid meet');
       svg.replaceChildren();
       svg.append(node('title',{id:titleId},waveform ? 'Forma d’onda e posizioni dei beat' : 'Andamento dei BPM nel tempo'));
-      svg.append(node('desc',{id:descriptionId},waveform ? 'Seleziona un beat per correggerlo. Trascina per spostarlo; clicca uno spazio libero per raggiungere quel punto. Le correzioni sono disponibili anche nei controlli numerici.' : 'BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. Clicca per raggiungere un punto o trascina un beat per correggerlo. Le correzioni sono disponibili anche nei controlli numerici.'));
+      svg.append(node('desc',{id:descriptionId},waveform ? 'Seleziona un beat per correggerlo. Trascina per spostarlo; clicca uno spazio libero per raggiungere quel punto. Le correzioni sono disponibili anche nei controlli numerici.' : 'BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. I cerchi vuoti viola indicano beat automatici da rivedere. Clicca per raggiungere un punto o trascina un beat per correggerlo. Le correzioni sono disponibili anche nei controlli numerici.'));
       svg.append(node('rect',{width,height,fill:palette.bg,rx:12}));
       const defs = node('defs');
       const clip = node('clipPath',{id:`tempo-clip-${serial}`});
@@ -230,7 +244,22 @@
       }
       if(state.showRaw!==false) plot.append(node('path',{d:pathFor('bpm'),fill:'none',stroke:palette.violet,'stroke-opacity':.73,'stroke-width':1.5,'stroke-linecap':'round','stroke-linejoin':'round'}));
       if(state.showSmooth!==false) plot.append(node('path',{d:pathFor('smoothed'),fill:'none',stroke:`url(#tempo-gradient-${serial})`,'stroke-width':2.7,'stroke-linecap':'round','stroke-linejoin':'round'}));
-      if(points.length<110 && state.showRaw!==false) for(const p of points) plot.append(node('circle',{cx:g.x(Number(p.end)),cy:g.y(Number(p.bpm)),r:2.5,fill:palette.violet,opacity:.7}));
+      if(points.length<110 && state.showRaw!==false) for(const p of points) {
+        if (!isLowAutomatic(beatsById.get(String(p.beatId)))) plot.append(node('circle',{cx:g.x(Number(p.end)),cy:g.y(Number(p.bpm)),r:2.5,fill:palette.violet,opacity:.7}));
+      }
+      // Review markers use every original point, independently of line decimation.
+      // One compound path avoids thousands of DOM nodes on dense automatic tracks.
+      const reviewGlyphs=[],reviewPixels=new Set();
+      for (const p of points) {
+        if (p.anomaly || isHold(p) || String(p.beatId)===String(state.selectedId) || !isLowAutomatic(beatsById.get(String(p.beatId)))) continue;
+        const px=g.x(Number(p.end)),py=g.y(Number(p.bpm)),pixel=Math.round(px)+','+Math.round(py);
+        if(reviewPixels.has(pixel)) continue; reviewPixels.add(pixel);
+        reviewGlyphs.push(`M${(px+4.1).toFixed(2)},${py.toFixed(2)}a4.1,4.1 0 1,0 -8.2,0a4.1,4.1 0 1,0 8.2,0Z`);
+      }
+      if(reviewGlyphs.length) {
+        const reviews=node('path',{d:reviewGlyphs.join(' '),fill:palette.bg,stroke:palette.violet,'stroke-width':1.5});
+        reviews.append(node('title',null,'Automatico · da rivedere'));plot.append(reviews);
+      }
       const anomalies=points.filter(p=>p.anomaly && !isHold(p));
       for(const p of anomalies) {
         const px=g.x(Number(p.end)), py=g.y(Number(p.bpm));
@@ -259,7 +288,7 @@
       for (const beat of anchors) {
         const selected = String(beat.id) === String(state.selectedId), px = g.x(Number(beat.time));
         if (selected) plot.append(node('line',{x1:px,x2:px,y1:g.top,y2:g.height-g.bottom,stroke:palette.teal,'stroke-opacity':.3,'stroke-dasharray':'3 4'}));
-        plot.append(node('rect',{x:px-4,y:g.height-g.bottom-10,width:8,height:8,rx:2,fill:palette.bg,stroke:selected?palette.teal:palette.violet,'stroke-width':selected?2.2:1.5}));
+        plot.append(node('rect',{x:px-4,y:g.height-g.bottom-10,width:8,height:8,rx:2,fill:palette.bg,stroke:selected?palette.teal:palette.violet,'stroke-width':selected?2.2:1.5,'stroke-dasharray':!selected&&isLowAutomatic(beat)?'2 2':null}));
       }
       const selected=points.find(p=>String(p.beatId)===String(state.selectedId));
       if(selected) {
@@ -292,16 +321,27 @@
         }
         plot.append(node('path',{d:path,stroke:'#668d9a','stroke-width':1.2,'stroke-opacity':.78,fill:'none'}));
       }
-      // At overview scale, draw at most one ordinary beat per pixel; keep the selected one.
-      let previousX=-Infinity;
+      // Batch same-style marks into paths: 50,000 beats must not create 50,000 nodes.
+      // Low-confidence and hold marks survive overview thinning; zoom reveals each beat.
+      let previousX=-Infinity, selectedX=null;
+      const marks={normal:[],review:[],hold:[],gap:[]};
+      const occupied={normal:new Set(),review:new Set(),hold:new Set(),gap:new Set()};
       visibleBeats.forEach(beat=> {
-        const selected=String(beat.id)===String(state.selectedId), px=g.x(Number(beat.time));
-        const interval=intervalsByBeat.get(String(beat.id)), held=beat.fermataBefore || isHold(interval);
-        if(!selected && !held && px-previousX<1.3) return;
+        const selected=String(beat.id)===String(state.selectedId),px=g.x(Number(beat.time));
+        const interval=intervalsByBeat.get(String(beat.id)),held=beat.fermataBefore || isHold(interval),review=isLowAutomatic(beat),suspicious=interval && interval.anomaly;
+        if(selected) {selectedX=px;return;}
+        if(!held && !review && !suspicious && !beat.breakBefore && px-previousX<1.3) return;
         previousX=px;
-        plot.append(node('line',{x1:px,x2:px,y1:g.top+5,y2:g.height-g.bottom-3,stroke:selected?palette.teal:held?palette.lavender:beat.breakBefore?palette.amber:palette.violet,'stroke-width':selected?2.5:held?1.5:1,'stroke-opacity':selected||held?1:.55,'stroke-dasharray':held?'3 3':null}));
-        if(selected) plot.append(node('circle',{cx:px,cy:g.top+5,r:4,fill:palette.teal}));
+        const kind=held?'hold':(beat.breakBefore || suspicious)?'gap':review?'review':'normal';
+        const pixel=Math.round(px);
+        if(occupied[kind].has(pixel)) return; occupied[kind].add(pixel);
+        marks[kind].push(`M${px.toFixed(2)},${g.top+5}V${g.height-g.bottom-3}`);
       });
+      for(const kind of ['normal','review','gap','hold']) if(marks[kind].length) plot.append(node('path',{d:marks[kind].join(' '),fill:'none',stroke:kind==='hold'?palette.lavender:kind==='gap'?palette.amber:palette.violet,'stroke-width':kind==='normal'?1:1.5,'stroke-opacity':kind==='normal'?.55:1,'stroke-dasharray':kind==='hold'?'3 3':kind==='review'?'2 3':null}));
+      if(selectedX!==null) {
+        plot.append(node('line',{x1:selectedX,x2:selectedX,y1:g.top+5,y2:g.height-g.bottom-3,stroke:palette.teal,'stroke-width':2.5}));
+        plot.append(node('circle',{cx:selectedX,cy:g.top+5,r:4,fill:palette.teal}));
+      }
     }
     function hit(point) {
       if(!geometry || point.x<geometry.left-8 || point.x>geometry.width-geometry.right+8) return null;
@@ -365,7 +405,9 @@
           const suspicious=interval && interval.anomaly && !isHold(interval) ? interval.anomaly : '';
           const annotation=[suspicious,expression,found.anchor ? 'Inizio tratto' : ''].filter(Boolean).join(' · ');
           const text=`${timeLabel(found.time,true)}${annotation ? ' · '+annotation : ''}${found.interval ? ' · '+Number(found.interval.bpm).toFixed(1)+' BPM' : ''}`;
-          showTooltip(geometry.x(found.time),found.y,text);
+          const beat=found.beat || beatsById.get(String(found.id));
+          const automatic=isAutomatic(beat) ? (isLowAutomatic(beat) ? 'Automatico · da rivedere' : 'Automatico') : '';
+          showTooltip(geometry.x(found.time),found.y,text,automatic);
         } else hideTooltip();
       }
     }
