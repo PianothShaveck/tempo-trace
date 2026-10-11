@@ -1,50 +1,39 @@
 # Tempo Trace
 
-Grafici BPM da audio e video, con beat automatici o manuali. File elaborati sul dispositivo, senza dipendenze esterne.
+Analisi del tempo musicale da audio/video. HTML, CSS e JavaScript senza dipendenze runtime o build; elaborazione sul dispositivo.
 
-## Uso
+## Sviluppo
 
-1. Apri `index.html` o il sito e importa un file.
-2. Premi **Rileva beat**. Puoi limitare il tratto, indicare il tempo o guidare il rilevamento con 4–8 tap consecutivi.
-3. Premi **Applica**, ascolta con il **click** e correggi i punti trascinandoli o nell’editor. **Conferma** approva un beat automatico; **Annulla** ripristina i dati precedenti.
-4. Esporta il progetto JSON per riprenderlo; CSV e SVG per dati e grafico. Conserva separatamente l’audio.
-
-| Tasto | Azione |
-| --- | --- |
-| `P` | Riproduci / pausa |
-| `Spazio` | Marca beat |
-| `← →` / `Maiusc ← →` | Sposta ±1 / ±5 s |
-| `Ctrl/⌘ Z` / `Ctrl/⌘ Maiusc Z` | Annulla / ripristina |
-| `Canc` | Elimina beat |
-
-La velocità d’ascolto non cambia i BPM misurati. In **Analisi**, scegli il valore musicale della pulsazione: i BPM del grafico sono espressi in semiminime. L’intervallo e il tempo indicativo del rilevatore, invece, sono pulsazioni al minuto.
-
-Rubato, legato e suddivisioni possono rendere ambigua la pulsazione: controlla i punti segnalati e, se necessario, usa un tempo indicativo o i tap manuali.
-
-**Fermata prima** distingue una fermata intenzionale; **Interruzione prima** esclude un tratto non marcato. Le medie includono le fermate, la tendenza e il rilevamento delle sezioni ne escludono l’effetto. Le sezioni indicano cambi persistenti di tempo, non la forma musicale.
-
-Rilevamento: massimo 30 minuti / 128 MB; formati secondo i codec del browser. I tap manuali restano disponibili per i file più lunghi.
-
-## GitHub Pages
-
-Carica il contenuto della cartella, con `index.html` alla radice. Seleziona **Settings → Pages → Deploy from a branch → main → /(root) → Save**.
-
-Aggiornamenti:
-
-```sh
-git add .
-git commit -m "Update Tempo Trace"
-git push
-```
-
-Test, con Node.js:
+Aprire `index.html` in un browser moderno. Test con Node.js:
 
 ```sh
 node --test tests/*.test.cjs
 ```
 
-I test usano audio sintetico e un DOM simulato.
+Prima di distribuire modifiche agli asset, aggiornare gli URL per invalidare la cache:
+
+```sh
+node scripts/version-assets.cjs
+```
+
+Committare anche i file aggiornati dal comando. L’hosting serve direttamente la radice del repository.
+
+## Codice
+
+- `assets/app.js`: stato, interfaccia, cronologia, import/export.
+- `assets/analysis.js`: BPM, sezioni, agogica; `analysis-worker.js` esegue le analisi più lunghe.
+- `assets/beat-detection.js`: attacchi spettrali, periodicità locale e tracciamento dei beat.
+- `assets/detection-client.js`: decodifica, cache PCM, Worker e annullamento.
+- `assets/charts.js`, `click-track.js`: grafici SVG e click di verifica.
+
+## Vincoli
+
+- Usare secondi della registrazione originale, indipendenti dalla velocità d’ascolto.
+- Conservare la compatibilità JSON v1, le correzioni manuali e l’annullamento.
+- Distinguere fermate, interruzioni e beat interpolati. L’assenza di attacchi non prova una fermata: il rilevatore attuale può interrompere note lunghe regolarmente misurate.
+- Non equiparare il supporto euristico all’accuratezza. Per valutarla servono beat annotati; i test sintetici e il DOM simulato non sostituiscono il collaudo audio/browser.
+- Mantenere controlli accessibili, testi essenziali e nessun caricamento dell’audio su server.
 
 ## Riferimenti
 
-Implementazione originale: [programmazione dinamica](https://www.ee.columbia.edu/~dpwe/LabROSA/matlab/beat_simple/), [periodicità locale per pianoforte espressivo](https://arxiv.org/abs/2308.10355). Licenza MIT: `LICENSE`.
+[Dynamic programming beat tracking](https://www.ee.columbia.edu/~dpwe/LabROSA/matlab/beat_simple/) · [Local periodicity for expressive piano](https://arxiv.org/abs/2308.10355). Implementazione originale; licenza MIT.

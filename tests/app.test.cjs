@@ -27,9 +27,10 @@ function boot(storageEntries = [], overrides = {}) {
     setTimeout: () => ++taskId, clearTimeout() {}, requestAnimationFrame: () => ++taskId, cancelAnimationFrame() {},
     URL: {revokeObjectURL() {}, createObjectURL: () => 'blob:test'}, Blob, AbortController, console, ...overrides});
   // Expose only in this VM copy. Production app remains a closed IIFE.
-  const hook = `globalThis.app = {validateProject, adoptProject, loadProject, tap, moveBeat, removeSelected,
+  const hook = `globalThis.app = {validateProject, adoptProject, loadProject, loadFile, tap, moveBeat, removeSelected,
     selectBeat, undo, redo, seekTo, persist, payload, snapshot, openDetection, runDetection, applyDetection, cancelDetection,
     attachFile(file = {name:'piano.wav',size:1234}) {currentFile = file;}, setView(start, end) {viewStart=start;viewEnd=end;},
+    stubProbe(duration=30) {probeFile=async()=>duration;},
     attachMedia() {hasMedia = true;}, get state() {return state;}, get analysis() {return analysis;},
     get history() {return {undo: undoStack.length, redo: redoStack.length};}, get hasMedia() {return hasMedia;}};`;
   assert.match(source, /\}\)\(\);\s*$/);
@@ -228,7 +229,7 @@ test('invalid JSON imports leave the current session and history intact', async 
 test('worker discards an obsolete response and then analyzes only the latest queued correction', () => {
   const h = workerHarness(); h.open(project([1, 2])); h.open(longProject());
   const worker = h.workers[0];
-  assert.equal(worker.url, 'assets/analysis-worker.js');
+  assert.match(worker.url, /^assets\/analysis-worker\.js\?v=[a-f0-9]{12}$/);
   assert.equal(worker.messages.length, 1);
   h.api.moveBeat('b600', 300.1); h.api.moveBeat('b600', 300.2);
   assert.equal(worker.messages.length, 1);
@@ -422,4 +423,24 @@ test('a single confirmed manual beat among automatic beats survives a fresh dete
   h.api.applyDetection();
   assert.deepEqual(plain(h.api.state.beats.find(b => b.id === 'b1')), confirmed);
   assert.equal(h.api.state.beats.some(b => b.time === 2.03), false);
+});
+
+test('a fresh import offers automatic or manual marking; relinking a saved project does not', async () => {
+  const file={name:'piano.wav',size:1234,type:'audio/wav'};
+  const automatic=detectionHarness();automatic.api.stubProbe();
+  await automatic.api.loadFile(file);
+  assert.equal(automatic.$('beatModeDialog').open,true);
+  assert.equal(automatic.requests.length,0,'import must not start detection before a choice');
+  automatic.$('chooseAutomatic').click();
+  assert.equal(automatic.$('beatModeDialog').open,false);
+  assert.equal(automatic.$('detectDialog').open,true);
+  const manual=detectionHarness();manual.api.stubProbe();await manual.api.loadFile(file);
+  manual.$('chooseManual').click();
+  assert.equal(manual.$('beatModeDialog').open,false);
+  assert.equal(manual.$('detectDialog').open,false);
+  assert.equal(manual.requests.length,0);
+  const restored=detectionHarness();restored.open(project([1,2,3]));restored.api.stubProbe();
+  await restored.api.loadFile(file,true);
+  assert.equal(restored.$('beatModeDialog').open,false);
+  assert.equal(restored.api.state.beats.length,3);
 });

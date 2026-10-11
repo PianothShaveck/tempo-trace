@@ -68,11 +68,11 @@
   function persist() {
     clearTimeout(savedTimer);
     if (!state.media) return;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payload())); autosaveFailed = false; $('saveStatus').textContent = 'Salvato in locale'; }
-    catch { $('saveStatus').textContent = 'Salva il progetto'; if (!autosaveFailed) toast('Salvataggio locale non disponibile. Esporta il progetto JSON.', true); autosaveFailed = true; }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(payload())); autosaveFailed = false; $('saveStatus').hidden = true; }
+    catch { $('saveStatus').hidden = false; $('saveStatus').textContent = 'Esporta il progetto'; if (!autosaveFailed) toast('Salvataggio locale non disponibile. Esporta il progetto JSON.', true); autosaveFailed = true; }
   }
   function scheduleSave() {
-    clearTimeout(savedTimer); $('saveStatus').textContent = 'Salvataggio…'; savedTimer = setTimeout(persist, 350);
+    clearTimeout(savedTimer); savedTimer = setTimeout(persist, 350);
   }
   function changed() {
     editRevision++;
@@ -92,7 +92,7 @@
     }
     if(!analysisWorker){
       try{
-        analysisWorker=new Worker('assets/analysis-worker.js');
+        analysisWorker=new Worker('assets/analysis-worker.js?v=71c6c863af3d');
         analysisWorker.onerror=fallback;
         analysisWorker.onmessage=event=>{
           workerRunning=false;
@@ -128,7 +128,6 @@
     if (!active) return;
     $('fileName').textContent = state.media.name || 'Esecuzione';
     $('fileName').title = state.media.name || 'Esecuzione';
-    $('fileKind').textContent = state.media.demo ? 'ESEMPIO' : state.media.kind === 'video' ? 'VIDEO' : 'AUDIO';
     $('relinkBanner').hidden = hasMedia;
     $('relinkButton').textContent=state.media.demo?'Riapri esempio':'Collega file';
     $('relinkText').textContent=state.media.demo?'Rigenera l’audio dell’esempio.':'Riapri il file per ascoltare questa sessione.';
@@ -177,7 +176,8 @@
     const issues=[...analysis.anomalies,...weak.map(b=>({beatId:b.id,end:b.time,anomaly:b.inferred?'Beat interpolato':'Rilevamento debole',bpm:null}))].sort((a,b)=>a.end-b.end);
     $('anomalyCount').textContent = String(issues.length);
     const list = $('anomalyList'); list.replaceChildren();
-    if (!issues.length) { list.append(Object.assign(document.createElement('p'), {className:'empty-note',textContent:'Nessuna segnalazione.'})); return; }
+    $('anomaliesPanel').hidden = !issues.length;
+    if (!issues.length) return;
     issues.slice(0, 250).forEach(interval => {
       const button = Object.assign(document.createElement('button'), {className:'anomaly-row'});
       button.append(Object.assign(document.createElement('strong'), {textContent:formatTime(interval.end,true)}),Object.assign(document.createElement('span'), {textContent:interval.anomaly}),Object.assign(document.createElement('span'), {textContent:number(interval.bpm)?bpm(interval.bpm)+' BPM':''}));
@@ -193,12 +193,13 @@
     $('confirmBeat').hidden=beat.source!=='auto';
     $('beatTime').value = beat.time.toFixed(3); $('beatTime').max = String(extent());
     $('breakBefore').checked = !!beat.breakBefore; $('breakBefore').disabled = index === 0;
-    $('fermataBefore').checked=!!beat.fermataBefore; $('fermataBefore').disabled=index===0 || !!beat.breakBefore;
+    $('fermataBefore').checked=!!beat.fermataBefore; $('fermataBefore').disabled=index===0;
   }
   function renderExpressions() {
     const events=analysis.events || []; $('expressionCount').textContent=String(events.length);
     const list=$('expressionList'); list.replaceChildren();
-    if(!events.length){list.append(Object.assign(document.createElement('p'),{className:'empty-note',textContent:'Nessuna variazione graduale o fermata rilevata.'}));return;}
+    $('expressionPanel').hidden = !events.length;
+    if (!events.length) return;
     events.slice(0,250).forEach(event=>{
       const button=Object.assign(document.createElement('button'),{className:'anomaly-row expression-row'});
       button.append(Object.assign(document.createElement('strong'),{textContent:formatTime(event.start)}),Object.assign(document.createElement('span'),{className:'event-label',textContent:event.label}),Object.assign(document.createElement('span'),{className:'event-tag',textContent:event.confidence==='manual'?'Confermata':event.confidence==='candidate'?'Da confermare':''}));
@@ -320,6 +321,7 @@
     return {beats,options,duration:data.duration,selectedId:null,media:{name:data.media.name,size:number(data.media.size)?data.media.size:0,type:typeof data.media.type==='string'?data.media.type:'',kind:data.media.kind==='video'?'video':'audio',demo:data.media.demo===true}};
   }
   function unloadMedia() {
+    if($('beatModeDialog').open)$('beatModeDialog').close();
     cancelDetection(); currentFile=null;globalThis.TempoDetectionClient?.clear();clickTrack?.reset();
     media.pause(); hasMedia=false; media.removeAttribute('src'); media.load(); media.hidden=true;
     if (sourceURL) URL.revokeObjectURL(sourceURL); sourceURL=null; peaks=null;
@@ -380,6 +382,7 @@
       changed(); if(relink)toast('File collegato.');
       // Waveform generation is optional. The original file remains the player source.
       if (!demoData) decodePeaks(file, token, duration);
+      if (!relink && !demoData) showDialog('beatModeDialog');
     } catch(error) { URL.revokeObjectURL(url); if (token===loadToken) toast(error.message || 'Impossibile aprire il file.',true); }
   }
   async function decodePeaks(file, token, duration) {
@@ -415,7 +418,7 @@
   }
   function baseName() { return (state.media?.name || 'tempo-trace').replace(/\.[^.]+$/,'').replace(/[^\p{L}\p{N} _.-]/gu,'_').slice(0,100); }
   function csv(rows) { return '\ufeff'+rows.map(row=>row.map(cell=>'"'+String(cell??'').replaceAll('"','""')+'"').join(';')).join('\r\n'); }
-  function exportProject() { persist(); download(JSON.stringify(payload(),null,2),baseName()+'.tempo.json','application/json'); toast('Progetto esportato. Conserva anche il file originale.'); }
+  function exportProject() { persist(); download(JSON.stringify(payload(),null,2),baseName()+'.tempo.json','application/json'); toast('Progetto esportato.'); }
   function renderBeatTable() {
     const pageSize=80, pageCount=Math.max(1,Math.ceil(state.beats.length/pageSize)); page=clamp(page,0,pageCount-1);
     const intervals=new Map(analysis.intervals.map(i=>[i.beatId,i])); $('beatTable').replaceChildren();
@@ -553,6 +556,8 @@
   $('restoreButton').addEventListener('click',()=>{try {adoptProject(validateProject(JSON.parse(localStorage.getItem(STORAGE_KEY))));toast('Sessione ripristinata. Collega la registrazione originale.');} catch {toast('La sessione salvata non è leggibile.',true);}});
   $('helpButton').addEventListener('click',()=>showDialog('helpDialog'));
   $('detectButton').addEventListener('click',openDetection);
+  $('chooseAutomatic').addEventListener('click',()=>{$('beatModeDialog').close();openDetection();});
+  $('chooseManual').addEventListener('click',()=>{$('beatModeDialog').close();$('playButton').focus();});
   $('detectForm').addEventListener('submit',e=>{e.preventDefault();if($('detectForm').reportValidity())runDetection();});
   $('detectApply').addEventListener('click',applyDetection);
   $('cancelDetection').addEventListener('click',cancelDetection);
@@ -562,9 +567,11 @@
   });
   $('clickTrackButton').addEventListener('click',async()=>{
     if(!clickTrack)return toast('Click non disponibile.',true);
-    try{const active=await clickTrack.setEnabled(!clickTrack.enabled);$('clickTrackButton').setAttribute('aria-pressed',String(active));}
+    try{const active=await clickTrack.setEnabled(!clickTrack.enabled);$('clickTrackButton').setAttribute('aria-pressed',String(active));$('clickVolume').hidden=!active;$('clickAutoLabel').hidden=!active;$('clickAuto').disabled=!clickTrack.balanceAvailable;if(!clickTrack.balanceAvailable){$('clickAuto').checked=false;toast('Bilanciamento automatico non disponibile. Regola il volume del click.');}}
     catch(error){toast(error.message||'Click non disponibile.',true);}
   });
+  $('clickAuto').addEventListener('change',e=>clickTrack?.setAutoBalance(e.target.checked));
+  $('clickVolume').addEventListener('input',e=>{const value=Number(e.target.value);clickTrack?.setVolume(value);e.target.setAttribute('aria-valuetext',Math.round(value*100)+'%');});
   $('playButton').addEventListener('click',togglePlay); $('restartButton').addEventListener('click',()=>seekTo(0));
   $('seek').addEventListener('input',e=>seekTo(Number(e.target.value)));
   $('speed').addEventListener('change',e=>{media.playbackRate=Number(e.target.value);media.preservesPitch=true;});
@@ -615,7 +622,7 @@
   document.addEventListener('click',e=>{
     if(e.detail>0 && !e.target.closest('dialog'))e.target.closest('button')?.blur();
   });
-  for(const id of ['speed','volume','seek','pan'])$(id).addEventListener('change',e=>{if(pointerInteraction)e.target.blur();});
+  for(const id of ['speed','volume','clickVolume','seek','pan'])$(id).addEventListener('change',e=>{if(pointerInteraction)e.target.blur();});
   let dragDepth=0;
   document.addEventListener('dragenter',e=>{if(!Array.from(e.dataTransfer?.types||[]).includes('Files'))return;e.preventDefault();dragDepth++;document.body.classList.add('dragging-file');$('dropZone').classList.add('drag-over');});
   document.addEventListener('dragover',e=>{if(Array.from(e.dataTransfer?.types||[]).includes('Files'))e.preventDefault();});
