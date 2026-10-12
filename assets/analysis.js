@@ -1,6 +1,8 @@
 /* Tempo Trace — zero-dependency analysis of taps in original media seconds.
  *
- * TempoAnalysis.analyze(beats, options) (also exported with CommonJS).
+ * TempoAnalysis.analyze(beats, options, sectionBoundaries = null) (also CommonJS).
+ * sectionBoundaries: optional manual starting times, snapped to existing beats.
+ * null keeps automatic segmentation; [] merges all measured coverage.
  * beats: [{id, time, breakBefore?, fermataBefore?}]; invalid/negative times are ignored,
  * duplicate times are merged, and input is never mutated. A breakBefore on a
  * beat prevents an interval from the preceding beat and starts a new group.
@@ -291,7 +293,59 @@
     return median(values);
   }
 
-  function analyze(input, settings) {
+  // Missing coverage is not evidence of a new tempo. A boundary at a gap
+  // requires a persistent tempo change supported by both measured sides.
+  function mergeAcrossGaps(sections, intervals, config, unit) {
+    const byStart=new Map(intervals.map((p,i)=>[p.start,i])),byEnd=new Map(intervals.map((p,i)=>[p.end,i]));
+    function evidence(section,fromEnd){
+      const from=byStart.get(section.start),to=byEnd.get(section.end)+1;
+      let a=fromEnd?to:from,b=a,duration=0,count=0;
+      while((fromEnd?a>from:b<to)&&(duration<config.minSectionSeconds||count<3)){
+        const p=intervals[fromEnd?--a:b++];
+        if(!p.anomaly&&!isHold(p)){duration+=p.end-p.start;count++;}
+      }
+      return {duration,summary:windowSummary(intervals,a,b)};
+    }
+    const output=[];
+    for(const section of sections){
+      const previous=output.at(-1);
+      if(previous&&section.start>previous.end+.00001){
+        const a=evidence(previous,true),b=evidence(section,false),left=a.summary,right=b.summary;
+        const change=left&&right?Math.abs(left.center-right.center):0;
+        const distinct=a.duration+1e-9>=config.minSectionSeconds&&b.duration+1e-9>=config.minSectionSeconds&&left&&right&&change>=Math.log1p(config.sectionThreshold)&&change>2.2*(left.deviation+right.deviation);
+        if(!distinct){
+          const duration=previous.count*60*unit/previous.bpm+section.count*60*unit/section.bpm;
+          previous.end=section.end;previous.count+=section.count;previous.bpm=previous.count*60*unit/duration;continue;
+        }
+      }
+      output.push({...section});
+    }
+    return output;
+  }
+
+  // Manual boundaries snap to starting beats. Means use measured coverage,
+  // excluding the silent/unmarked duration of a gap even after a merge.
+  function sectionsAtBoundaries(intervals,boundaries,unit=1){
+    if(!intervals.length)return [];
+    const cuts=new Set([0,intervals.length]);
+    for(const time of boundaries||[]){
+      if(!Number.isFinite(time)||time<=intervals[0].start||time>=intervals.at(-1).end)continue;
+      let low=0,high=intervals.length;
+      while(low<high){const mid=(low+high)>>>1;if(intervals[mid].start<time)low=mid+1;else high=mid;}
+      if(low===intervals.length)low--;
+      else if(low>0&&time-intervals[low-1].start<intervals[low].start-time)low--;
+      if(low>0)cuts.add(low);
+    }
+    const indices=[...cuts].sort((a,b)=>a-b),result=[];
+    for(let n=1;n<indices.length;n++){
+      const from=indices[n-1],to=indices[n];let duration=0;
+      for(let i=from;i<to;i++)duration+=intervals[i].end-intervals[i].start;
+      result.push({start:intervals[from].start,end:intervals[to-1].end,count:to-from,bpm:(to-from)*60*unit/duration,id:'section-'+n});
+    }
+    return result;
+  }
+
+  function analyze(input, settings, sectionBoundaries=null) {
     const options = settings && typeof settings === 'object' ? settings : {};
     const unit = typeof options.beatUnit === 'number' && Number.isFinite(options.beatUnit) &&
       options.beatUnit > 0 && options.beatUnit <= 16 ? options.beatUnit : 1;
@@ -338,7 +392,9 @@
       smoothGroup(group, config.smoothing);
       sections = sections.concat(segmentGroup(group, config, unit));
     }
-    sections.sort((a, b) => a.start - b.start).forEach((section, i) => { section.id = 'section-' + (i + 1); });
+    sections.sort((a, b) => a.start - b.start);
+    sections=Array.isArray(sectionBoundaries)?sectionsAtBoundaries(intervals,sectionBoundaries,unit):mergeAcrossGaps(sections,intervals,config,unit);
+    sections.forEach((section,i)=>{section.id='section-'+(i+1);});
     let duration = 0;
     let min = Infinity;
     let max = -Infinity;
@@ -353,5 +409,5 @@
     }, anomalies: intervals.filter(interval => interval.anomaly), events: events.sort((a, b) => a.start - b.start)};
   }
 
-  return Object.freeze({analyze, normalizeBeats});
+  return Object.freeze({analyze, normalizeBeats, sectionsAtBoundaries});
 });

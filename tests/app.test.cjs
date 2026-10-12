@@ -28,7 +28,8 @@ function boot(storageEntries = [], overrides = {}) {
     URL: {revokeObjectURL() {}, createObjectURL: () => 'blob:test'}, Blob, AbortController, console, ...overrides});
   // Expose only in this VM copy. Production app remains a closed IIFE.
   const hook = `globalThis.app = {validateProject, adoptProject, loadProject, loadFile, tap, moveBeat, removeSelected,
-    selectBeat, undo, redo, seekTo, persist, payload, snapshot, openDetection, runDetection, applyDetection, cancelDetection, exportGraphic, exportAudio,
+    selectBeat, undo, redo, seekTo, persist, payload, snapshot, openDetection, runDetection, applyDetection, cancelDetection, exportGraphic, exportAudio, followPlayhead, panChart, animatePlayback,
+    get view(){return {start:viewStart,end:viewEnd,yRange,follow:followPlayback};},
     attachFile(file = {name:'piano.wav',size:1234}) {currentFile = file;}, setView(start, end) {viewStart=start;viewEnd=end;},
     stubProbe(duration=30) {probeFile=async()=>duration;},
     attachMedia() {hasMedia = true;}, get state() {return state;}, get analysis() {return analysis;},
@@ -49,7 +50,7 @@ function workerHarness() {
     // reference that later edits can mutate. Preserve that important behavior.
     postMessage(data) {this.messages.push(plain(data));}
     complete(index) {const data = this.messages[index]; this.onmessage({data: {id: data.id,
-      analysis: TempoAnalysis.analyze(data.beats, data.options)}});}
+      analysis: TempoAnalysis.analyze(data.beats, data.options, data.sectionBoundaries)}});}
     fail() {this.onerror(new Error('Worker unavailable'));}
     terminate() {this.terminated = true;}
   }
@@ -465,4 +466,63 @@ test('audio dialog exports click-only excerpts without a linked source and ignor
  assert.equal(h.$('audioExportDialog').open,true);assert.equal(h.$('exportMusicRow').hidden,true);assert.equal(h.$('exportRateRow').hidden,false);
  const promise=h.api.exportAudio();assert.equal(pending.file,null);assert.equal(pending.options.rate,.75);assert.equal(pending.options.start,1);assert.equal(pending.options.end,3);
  h.$('audioExportDialog').close();assert.ok(pending.signal.aborted);pending.resolve(new Blob(['stale']));await promise;assert.equal(downloads,0);assert.equal(h.$('startAudioExport').disabled,false);
+});
+
+test('zoomed playback follows near the right edge and after seeks without changing either zoom',async()=>{
+ const h=boot();h.open(project([0,.5,1,1.5,2]));h.api.attachMedia();h.api.setView(0,10);
+ h.$('bpmMin').value='80';h.$('bpmMax').value='140';h.$('bpmMax').dispatch('change');
+ assert.equal(h.api.followPlayhead(9),false,'paused playback leaves the window alone');await h.media.play();
+ assert.equal(h.api.followPlayhead(7),false);h.media.currentTime=8.5;h.api.animatePlayback(100);
+ assert.equal(h.api.view.start,3.5);assert.equal(h.api.view.end,13.5);assert.deepEqual(plain(h.api.view.yRange),{min:80,max:140});
+ h.api.seekTo(29);assert.equal(h.api.view.start,20);assert.equal(h.api.view.end,30);
+ h.api.seekTo(1);assert.equal(h.api.view.start,0);assert.equal(h.api.view.end,10);
+});
+test('manual two-axis panning clamps to data and disables follow until it is explicitly restored',async()=>{
+ const h=boot();h.open(project([0,.5,1]));h.api.attachMedia();await h.media.play();
+ h.api.panChart({start:-2,end:8,min:-20,max:80,vertical:true});
+ assert.deepEqual(plain(h.api.view),{start:0,end:10,yRange:{min:0,max:100},follow:false});
+ h.media.currentTime=25;assert.equal(h.api.followPlayhead(25),false);
+ h.$('followPlayback').click();assert.equal(h.api.view.start,20);assert.equal(h.api.view.end,30);assert.equal(h.api.view.follow,true);
+ h.$('pan').value='5';h.$('pan').dispatch('input');assert.equal(h.api.view.follow,false);assert.equal(h.api.view.start,5);
+ h.api.panChart({start:8,end:18,min:0,max:100,vertical:false});assert.deepEqual(plain(h.api.view.yRange),{min:0,max:100});
+});
+test('section edits split, move and merge with undo, persistence, and automatic reset',()=>{
+ const h=boot();h.open(project(Array.from({length:41},(_,i)=>i*.5)));
+ h.$('editSections').click();h.$('newSectionTime').value='5.2';h.$('addSection').click();h.$('sectionsForm').dispatch('submit');
+ assert.deepEqual(plain(h.api.state.sectionBoundaries),[5]);assert.equal(h.api.analysis.sections.length,2);
+ h.$('editSections').click();let inputs=h.$('sectionBoundaries').querySelectorAll('input');inputs[1].value='7.4';inputs[1].dispatch('input');h.$('sectionsForm').dispatch('submit');
+ assert.deepEqual(plain(h.api.state.sectionBoundaries),[7.5]);h.api.persist();
+ const restored=h.api.validateProject(JSON.parse(h.storage.get('tempo-trace.session.v1')));assert.deepEqual(plain(restored.sectionBoundaries),[7.5]);
+ h.$('editSections').click();h.$('sectionBoundaries').querySelector('button').click();h.$('sectionsForm').dispatch('submit');
+ assert.deepEqual(plain(h.api.state.sectionBoundaries),[]);assert.equal(h.api.analysis.sections.length,1);
+ h.api.undo();assert.deepEqual(plain(h.api.state.sectionBoundaries),[7.5]);
+ h.$('editSections').click();h.$('automaticSections').click();assert.equal(h.api.state.sectionBoundaries,null);h.api.undo();assert.deepEqual(plain(h.api.state.sectionBoundaries),[7.5]);
+ h.api.moveBeat('b15',7.55);assert.deepEqual(plain(h.api.state.sectionBoundaries),[7.55]);assert.equal(h.api.analysis.sections[1].start,7.55);
+});
+test('section dialog cancellation and invalid cuts leave the session and history untouched',()=>{
+ const h=boot();h.open(project([0,.5,1,1.5,2]));const initial=plain(h.api.snapshot());
+ h.$('editSections').click();h.$('newSectionTime').value='0';h.$('addSection').click();assert.equal(h.$('sectionEditError').hidden,false);
+ h.$('newSectionTime').value='1';h.$('addSection').click();h.$('sectionsDialog').close();assert.deepEqual(plain(h.api.snapshot()),initial);assert.equal(h.api.history.undo,0);
+ for(const sectionBoundaries of ['no',[NaN],[-1],[31],[1,1]])assert.throws(()=>h.api.validateProject(project([0,.5,1],{sectionBoundaries})));
+ assert.equal(h.api.validateProject(project([0,.5,1])).sectionBoundaries,null);
+});
+test('a false detected gap can be reconnected without changing beat positions and the action is undoable',()=>{
+ const h=boot();h.open(project([], {beats:[{id:'a',time:0},{id:'b',time:.5},{id:'c',time:1,breakBefore:true},{id:'d',time:1.5}]}));
+ h.api.selectBeat('c');assert.equal(h.$('connectBeat').hidden,false);assert.equal(h.api.analysis.intervals.length,2);
+ h.$('connectBeat').click();assert.equal(h.api.analysis.intervals.length,3);assert.equal(h.$('connectBeat').hidden,true);
+ assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[0,.5,1,1.5]);h.api.undo();assert.equal(h.api.state.beats[2].breakBefore,true);
+});
+test('beat nudge buttons provide 50 and 10 ms while direct input retains millisecond precision',()=>{
+ const h=boot();h.open(project([0,1,2]));h.api.selectBeat('b1');
+ const buttons=h.document.querySelectorAll('[data-nudge]');assert.deepEqual(buttons.map(b=>Number(b.dataset.nudge)),[-.05,-.01,.01,.05]);
+ buttons[0].click();assert.equal(h.api.state.beats[1].time,.95);buttons[2].click();assert.equal(h.api.state.beats[1].time,.96);
+ h.$('beatTime').value='0.963';h.$('beatTime').dispatch('change');assert.equal(h.api.state.beats[1].time,.963);
+});
+test('manual boundaries reach the background worker and graphic export',async()=>{
+ const h=workerHarness();h.open(longProject());h.workers[0].complete(0);
+ h.$('editSections').click();h.$('newSectionTime').value='200';h.$('addSection').click();h.$('sectionsForm').dispatch('submit');h.workers[0].complete(1);
+ assert.deepEqual(plain(h.workers[0].messages[1].sectionBoundaries),[200]);assert.equal(h.api.analysis.sections.length,2);
+ let report;
+ const g=boot([],{TempoReport:{create(project){report=project;return {svg:'<svg/>',width:1440,height:884};}}});
+ g.open(project([0,.5,1,1.5,2],{sectionBoundaries:[1]}));await g.api.exportGraphic('svg');assert.equal(report.analysis.sections.length,2);assert.equal(report.analysis.sections[1].start,1);
 });

@@ -263,3 +263,26 @@ test('two gradual transitions retain three stable sections despite small rubato 
   near(result.sections[1].start, ramps[0].end);
   near(result.sections[2].start, ramps[1].end);
 });
+
+test('missing coverage at the same pulse does not invent a section; means still exclude the gap',()=>{
+ const beats=[...constant(120,20),...constant(120,20,100).map((b,i)=>({...b,id:'right-'+i,breakBefore:i===0}))];
+ const result=analyze(beats);assert.equal(result.sections.length,1);assert.equal(result.intervals.length,40);
+ near(result.stats.mean,120);near(result.sections[0].bpm,120);assert.equal(result.sections[0].end,110);
+ assert.equal(result.intervals.filter(p=>p.breakBefore).length,2,'the missing interval is still absent from the curve');
+});
+test('a short isolated run cannot force a tempo section at the next tracking restart',()=>{
+ const beats=[{id:'a',time:0},{id:'b',time:.6},...constant(100,40,2).map((b,i)=>({...b,id:'c'+i,breakBefore:i===0}))];
+ const result=analyze(beats);assert.equal(result.sections.length,1);near(result.sections[0].bpm,100);
+});
+test('manual divisions and merges preserve every measured interval and exclude gaps at any beat unit',()=>{
+ const beats=[...constant(120,20),...constant(90,18,100).map((b,i)=>({...b,id:'r'+i,breakBefore:i===0}))];
+ const automatic=analyze(beats,{beatUnit:.5}),merged=analyze(beats,{beatUnit:.5},[]),split=analyze(beats,{beatUnit:.5},[5,100]);
+ assert.equal(automatic.sections.length,2);assert.equal(merged.sections.length,1);assert.equal(split.sections.length,3);
+ assert.deepEqual(split.stats,automatic.stats);assert.deepEqual(merged.intervals,automatic.intervals);
+ near(merged.sections[0].bpm,38*30/22);assert.equal(split.sections.reduce((n,s)=>n+s.count,0),38);
+ near(split.sections[0].bpm,60);near(split.sections[2].bpm,45);
+});
+test('manual section boundaries snap to existing starting beats without creating zero-length sections',()=>{
+ const result=analyze(constant(120,20),{},[5.2,5.21,0,-2,10,Infinity]);
+ assert.equal(result.sections.length,2);assert.equal(result.sections[1].start,5);assert.equal(result.sections.reduce((n,s)=>n+s.count,0),20);
+});

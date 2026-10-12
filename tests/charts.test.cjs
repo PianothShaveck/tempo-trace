@@ -8,7 +8,7 @@ function harness(wave=false){
  svg.setPointerCapture=()=>{};svg.hasPointerCapture=()=>false;
  const context=vm.createContext({document,requestAnimationFrame:()=>1,cancelAnimationFrame(){}});
  vm.runInContext(fs.readFileSync(require.resolve('../assets/charts.js'),'utf8'),context);
- const callbacks={onSeek:t=>calls.push(['seek',t]),onSelectBeat:id=>calls.push(['select',id]),onMoveBeat:(...a)=>calls.push(['move',...a]),onInspectBeat:id=>calls.push(['inspect',id])};
+ const callbacks={onSeek:t=>calls.push(['seek',t]),onPan:view=>calls.push(['pan',view]),onSelectBeat:id=>calls.push(['select',id]),onMoveBeat:(...a)=>calls.push(['move',...a]),onInspectBeat:id=>calls.push(['inspect',id])};
  const chart=(wave?context.TempoCharts.createWaveform:context.TempoCharts.createTempoChart)(svg,callbacks);
  const beats=Array.from({length:21},(_,i)=>({id:String(i),time:i*.5}));
  const state={duration:10,viewStart:0,viewEnd:10,beats,analysis:Analysis.analyze(beats),showRaw:true,showSmooth:true};chart.render(state);
@@ -42,4 +42,21 @@ test('automatic vertical scale resists isolated extreme values and explicit limi
  const h=harness(),values=Array.from({length:100},(_,i)=>({bpm:i===20?60000:100+i%5,smoothed:102}));
  const scale=h.scale(values);assert.ok(scale.max<200);assert.equal(scale.clipped,1);
  const explicit=h.scale(values,{min:0,max:61000});assert.equal(explicit.max,61000);assert.equal(explicit.clipped,0);
+});
+
+test('dragging empty plot space pans both axes without selecting, moving a beat or seeking',()=>{
+ const h=harness();h.state.viewStart=2;h.state.viewEnd=8;h.state.yRange={min:80,max:160};h.chart.render(h.state);
+ h.event('pointerdown',300,90);h.event('pointermove',400,140);h.event('pointerup',400,140);
+ assert.equal(h.calls.length,1);const [action,view]=h.calls[0];assert.equal(action,'pan');assert.ok(view.start<2);assert.ok(view.min>80);assert.equal(view.end-view.start,6);assert.equal(view.max-view.min,80);assert.ok(view.vertical);
+ assert.equal(h.svg.style.touchAction,'none');
+});
+test('clicking empty plot space still seeks, while vertical dragging only changes the BPM view',()=>{
+ const h=harness();h.event('pointerdown',300,90);h.event('pointerup',300,90);assert.equal(h.calls[0][0],'seek');h.calls.length=0;
+ h.event('pointerdown',300,90);h.event('pointermove',300,160);h.event('pointerup',300,160);assert.equal(h.calls[0][0],'pan');assert.equal(h.calls[0][1].start,0);
+});
+test('a restart beat has a selectable square on the curve using the following interval, without inventing a BPM',()=>{
+ const h=harness();h.state.beats[10].breakBefore=true;h.state.analysis=Analysis.analyze(h.state.beats);h.chart.render(h.state);
+ assert.equal(h.state.analysis.intervals.length,19);assert.ok(!h.state.analysis.intervals.some(p=>p.beatId==='10'));
+ const marker=h.svg.querySelector('rect[data-anchor-beat="10"]');assert.ok(marker);const x=Number(marker.getAttribute('x'))+5,y=Number(marker.getAttribute('y'))+5;
+ h.event('pointerdown',x,y);h.event('pointerup',x,y);assert.deepEqual(h.calls,[['select','10']]);
 });

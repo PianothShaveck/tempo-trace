@@ -32,6 +32,7 @@ Committare anche i file aggiornati dal comando. L’hosting serve direttamente l
 
 - Usare secondi della registrazione originale, indipendenti dalla velocità d’ascolto.
 - Conservare la compatibilità JSON v1, le correzioni manuali e l’annullamento.
+- `sectionBoundaries`: `null` usa l’analisi automatica; un array di secondi fissa i confini manuali (`[]` = una sezione). Le medie escludono le interruzioni anche dopo un’unione.
 - Distinguere fermate, interruzioni e beat interpolati. L’assenza di attacchi non prova una fermata: il rilevatore attuale può interrompere note lunghe regolarmente misurate.
 - Non equiparare il supporto euristico all’accuratezza. Per valutarla servono beat annotati; i test sintetici e il DOM simulato non sostituiscono il collaudo audio/browser.
 - Mantenere controlli accessibili, testi essenziali e nessun caricamento dell’audio su server.

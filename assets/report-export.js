@@ -35,6 +35,11 @@
    else if(p.expressive==='fermata'||p.expressive==='possible-fermata')out.push(`<path d="M${px} ${py-5}L${px+5} ${py}L${px} ${py+5}L${px-5} ${py}Z" fill="${p.expressive==='fermata'?'#a77cb7':'white'}" stroke="#a77cb7" stroke-width="1.5"/>`);
    else out.push(`<circle cx="${px}" cy="${py}" r="${intervals.length<160?3:1.6}" fill="${p.anomaly?'#bd7523':'#9175cc'}"/>`);
   }
+  const starts=new Set(beats.map(b=>b.time)),measured=new Set(intervals.map(p=>p.end));
+  for(const p of intervals.filter(p=>p.breakBefore&&starts.has(p.start)&&!measured.has(p.start))){
+    const px=x(p.start),py=Math.max(top+6,Math.min(bottom-6,y(p.bpm)));
+    out.push(`<rect x="${px-4}" y="${py-4}" width="8" height="8" rx="1.5" fill="white" stroke="#9175cc" stroke-width="1.5"><title>Ripresa: BPM dal beat successivo</title></rect>`);
+  }
   out.push('</g>');rect(left,635,plotWidth,23,'#eef2f7',4);text(left-12,651,'Beat',10,'#526475','text-anchor="end"');
   const ticks=[],pixels=new Set();for(const b of beats){const px=Math.round(x(b.time));if(px<left||px>right||pixels.has(px))continue;pixels.add(px);ticks.push(`M${px} 641V652`);}out.push(`<path d="${ticks.join(' ')}" stroke="#9175cc"/>`);
   text(64,720,'● Beat',12,'#8064b5');text(163,720,'━ Tendenza',12,'#088d7c');

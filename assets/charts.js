@@ -61,14 +61,14 @@
   function create(svg, callbacks, waveform) {
     callbacks = callbacks || {};
     const serial = ++chartSerial;
-    let state = {}, geometry = null, points = [], visibleBeats = [], intervalsByBeat = new Map(), beatsById = new Map(), drag = null, disposed = false;
+    let state = {}, geometry = null, points = [], anchors = [], visibleBeats = [], intervalsByBeat = new Map(), beatsById = new Map(), drag = null, panDrag = null, disposed = false;
     let playhead = null, playheadDot = null, tooltip = null, tooltipText = null, tooltipBox = null, dragGhost = null;
     let resizeFrame = null, lastWidth = 0;
     const titleId = `tempo-chart-title-${serial}`, descriptionId = `tempo-chart-desc-${serial}`;
     svg.setAttribute('xmlns', NS);
     svg.setAttribute('role', 'img');
     svg.setAttribute('aria-labelledby', `${titleId} ${descriptionId}`);
-    svg.style.touchAction = 'pan-y';
+    svg.style.touchAction = waveform?'pan-y':'none';
     svg.style.userSelect = 'none';
 
     function localPoint(event) {
@@ -134,7 +134,10 @@
       const x = value => left + (value-start)/(end-start)*plotWidth;
       let rawPoints = (state.analysis && state.analysis.intervals || []).filter(item => finite(item.bpm) && Number(item.bpm)>0 && finite(item.end));
       const inView = rawPoints.filter(item => Number(item.end)>=start && Number(item.end)<=end);
-      const scale=tempoScale(inView,state.yRange),min=scale.min,max=scale.max,yStep=scale.step;
+      intervalsByBeat = new Map(rawPoints.map(interval => [String(interval.beatId), interval]));
+      const beatsByTime=new Map((state.beats||[]).map(b=>[b.time,b]));
+      anchors=waveform?[]:rawPoints.filter(p=>p.breakBefore&&p.start>=start&&p.start<=end).map(p=>({beat:beatsByTime.get(p.start),next:p,time:p.start})).filter(a=>a.beat&&!intervalsByBeat.has(String(a.beat.id)));
+      const scale=tempoScale([...new Set([...inView,...anchors.map(a=>a.next)])],state.yRange),min=scale.min,max=scale.max,yStep=scale.step;
       const y = value => top + (max-value)/(max-min)*plotHeight;
       geometry = {width,height,left,right,top,bottom,start,end,plotWidth,plotHeight,x,y,min,max,laneY:height-50};
       if(!waveform&&callbacks.onScale)callbacks.onScale(scale);
@@ -142,7 +145,7 @@
       svg.setAttribute('preserveAspectRatio','xMidYMid meet');
       svg.replaceChildren();
       svg.append(node('title',{id:titleId},waveform ? 'Forma d’onda e posizione di ascolto' : 'Andamento dei BPM nel tempo'));
-      svg.append(node('desc',{id:descriptionId},waveform ? 'Clicca sulla traccia per spostare la riproduzione. Questa traccia non modifica i beat.' : 'BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. I cerchi vuoti viola indicano beat automatici da rivedere. La riga Beat rende visibili tutte le posizioni. Seleziona un beat, poi trascinalo per correggerlo. Se i punti sono ravvicinati, il clic li ingrandisce. Le correzioni sono disponibili anche nei controlli numerici.'));
+      svg.append(node('desc',{id:descriptionId},waveform ? 'Clicca sulla traccia per spostare la riproduzione. Questa traccia non modifica i beat.' : 'BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. I cerchi vuoti viola indicano beat automatici da rivedere. La riga Beat rende visibili tutte le posizioni. I quadrati di ripresa usano il BPM del beat successivo. Trascina lo sfondo per spostare la vista orizzontalmente e verticalmente. Seleziona un beat, poi trascinalo per correggerlo. Se i punti sono ravvicinati, il clic li ingrandisce. Le correzioni sono disponibili anche nei controlli numerici.'));
       svg.append(node('rect',{width,height,fill:palette.bg,rx:12}));
       const defs = node('defs');
       const clip = node('clipPath',{id:`tempo-clip-${serial}`});
@@ -184,7 +187,6 @@
       const plot=node('g',{'clip-path':`url(#tempo-clip-${serial})`}); svg.append(plot);
       visibleBeats=(state.beats || []).filter(beat => finite(beat.time) && Number(beat.time)>=start && Number(beat.time)<=end);
       points=inView;
-      intervalsByBeat = new Map(rawPoints.map(interval => [String(interval.beatId), interval]));
       if (waveform) drawWaveform(plot);
       else {drawTempo(plot,rawPoints);drawBeatLane();}
       playhead=node('line',{x1:0,x2:0,y1:top-6,y2:waveform?height-bottom:height-29,stroke:palette.text,'stroke-opacity':.75,'stroke-width':1.4,'pointer-events':'none'});
@@ -306,6 +308,11 @@
         plot.append(node('circle',{cx:px,cy:py,r:7,fill:palette.bg,stroke:palette.teal,'stroke-width':2.3}));
         plot.append(node('circle',{cx:px,cy:py,r:2.5,fill:palette.text}));
       }
+      for(const anchor of anchors){
+        const px=g.x(anchor.time),py=markerY(anchor.next.bpm),selected=String(anchor.beat.id)===String(state.selectedId);
+        const marker=node('rect',{x:px-5,y:py-5,width:10,height:10,rx:2,fill:palette.bg,stroke:selected?palette.teal:palette.violet,'stroke-width':selected?2.5:1.8,'data-anchor-beat':anchor.beat.id});
+        marker.append(node('title',null,'Ripresa · BPM dal beat successivo'));plot.append(marker);
+      }
     }
     function markerY(bpm){return clamp(geometry.y(bpm),geometry.top+7,geometry.height-geometry.bottom-7);}
     function drawBeatLane(){
@@ -359,7 +366,11 @@
       let chosen=null,best=14;
       if(visibleBeats.length&&Math.abs(point.y-geometry.laneY)<22){
         const beat=visibleBeats[nearestIndex(visibleBeats,time,p=>Number(p.time))];
-        if(Math.abs(geometry.x(beat.time)-point.x)<12)return {id:beat.id,time:beat.time,y:geometry.laneY,beat,interval:intervalsByBeat.get(String(beat.id))};
+        if(Math.abs(geometry.x(beat.time)-point.x)<12)return {id:beat.id,time:beat.time,y:geometry.laneY,beat,interval:intervalsByBeat.get(String(beat.id)),anchor:anchors.find(a=>String(a.beat.id)===String(beat.id))};
+      }
+      for(const anchor of anchors){
+        const py=markerY(anchor.next.bpm),distance=Math.hypot(geometry.x(anchor.time)-point.x,py-point.y);
+        if(distance<best){best=distance;chosen={id:anchor.beat.id,beat:anchor.beat,time:anchor.time,y:py,anchor};}
       }
       if(!points.length) return chosen;
       const index=nearestIndex(points,time,p=>Number(p.end));
@@ -377,6 +388,7 @@
       if(point.x<geometry.left || point.x>geometry.width-geometry.right || point.y<geometry.top-10 || point.y>(waveform?geometry.height-geometry.bottom+5:geometry.laneY+23)) return;
       const found=waveform?null:hit(point);
       if(found) {
+        callbacks.onEditStart?.();
         const beats=state.beats||[],index=beats.findIndex(b=>String(b.id)===String(found.id));
         const previous=index>0?Number(beats[index-1].time):0;
         const next=index>=0&&index<beats.length-1?Number(beats[index+1].time):Number(state.duration);
@@ -387,13 +399,25 @@
         event.preventDefault();
       } else {
         const time=clamp(geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start),0,Number(state.duration));
-        if(callbacks.onSeek) callbacks.onSeek(time);
+        if(waveform){if(callbacks.onSeek)callbacks.onSeek(time);}
+        else{
+          panDrag={x:point.x,y:point.y,start:geometry.start,end:geometry.end,min:geometry.min,max:geometry.max,time,moved:false,pointerId:event.pointerId};
+          svg.setPointerCapture(event.pointerId);event.preventDefault();
+        }
       }
     }
     function pointerMove(event) {
       if(!geometry) return;
       const point=localPoint(event);
-      if(drag) {
+      if(panDrag){
+        if(event.pointerId!==panDrag.pointerId)return;
+        const dx=point.x-panDrag.x,dy=point.y-panDrag.y;
+        if(!panDrag.moved&&Math.hypot(dx,dy)<=6)return;
+        if(!panDrag.moved)callbacks.onEditStart?.();panDrag.moved=true;
+        const dt=-dx/geometry.plotWidth*(panDrag.end-panDrag.start),db=dy/geometry.plotHeight*(panDrag.max-panDrag.min);
+        callbacks.onPan?.({start:panDrag.start+dt,end:panDrag.end+dt,min:panDrag.min+db,max:panDrag.max+db,vertical:Math.abs(dy)>6});
+        svg.style.cursor='grabbing';hideTooltip();
+      }else if(drag) {
         if(!drag.canMove)return;
         if(Math.abs(point.x-drag.startX)>6) drag.moved=true;
         drag.time=clamp(geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start),drag.min,drag.max);
@@ -404,32 +428,37 @@
       } else {
         if(waveform){const time=clamp(geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start),0,Number(state.duration));svg.style.cursor='pointer';showTooltip(point.x,geometry.top,timeLabel(time,true));return;}
         const found=hit(point);
-        svg.style.cursor=found?(String(found.id)===String(state.selectedId)?'ew-resize':'pointer'):'crosshair';
+        svg.style.cursor=found?(String(found.id)===String(state.selectedId)?'ew-resize':'pointer'):'grab';
         if(found) {
           const interval=found.interval || (waveform ? intervalsByBeat.get(String(found.id)) : null);
           const expression=interval && expressionNames[interval.expressive] || (found.beat && found.beat.fermataBefore ? 'Fermata' : '');
           const suspicious=interval && interval.anomaly && !isHold(interval) ? interval.anomaly : '';
-          const annotation=[suspicious,expression,found.anchor ? 'Inizio tratto' : ''].filter(Boolean).join(' · ');
+          const annotation=[suspicious,expression,found.anchor ? 'Ripresa' : ''].filter(Boolean).join(' · ');
           const text=`${timeLabel(found.time,true)}${annotation ? ' · '+annotation : ''}${found.interval ? ' · '+Number(found.interval.bpm).toFixed(1)+' BPM' : ''}`;
           const beat=found.beat || beatsById.get(String(found.id));
           const automatic=isAutomatic(beat) ? (isLowAutomatic(beat) ? 'Automatico · da rivedere' : 'Automatico') : '';
-          showTooltip(geometry.x(found.time),found.y,text,[automatic,String(found.id)===String(state.selectedId)?'Trascina per correggere':'Clic per selezionare'].filter(Boolean).join(' · '));
+          showTooltip(geometry.x(found.time),found.y,text,[found.anchor?'BPM dal beat successivo: '+Number(found.anchor.next.bpm).toFixed(1):automatic,String(found.id)===String(state.selectedId)?'Trascina per correggere':'Clic per selezionare'].filter(Boolean).join(' · '));
         } else hideTooltip();
       }
     }
     function finishDrag(event,cancelled) {
+      if(panDrag&&event.pointerId===panDrag.pointerId){
+        const completed=panDrag;panDrag=null;
+        try{if(svg.hasPointerCapture(event.pointerId))svg.releasePointerCapture(event.pointerId);}catch(_){}
+        svg.style.cursor='grab';if(!cancelled&&!completed.moved)callbacks.onSeek?.(completed.time);return;
+      }
       if(!drag || event.pointerId!==drag.pointerId) return;
       const completed=drag; drag=null;
       try {if(svg.hasPointerCapture(event.pointerId)) svg.releasePointerCapture(event.pointerId);}catch(_){}
       if(dragGhost) dragGhost.setAttribute('visibility','hidden');
-      hideTooltip();svg.style.cursor='crosshair';
+      hideTooltip();svg.style.cursor='grab';
       if(!cancelled) {
         if(callbacks.onSelectBeat) callbacks.onSelectBeat(completed.id);
         if(completed.dense&&callbacks.onInspectBeat)callbacks.onInspectBeat(completed.id);
         if(completed.canMove&&completed.moved && Math.abs(completed.time-completed.originalTime)>.0001 && callbacks.onMoveBeat) callbacks.onMoveBeat(completed.id,completed.time);
       }
     }
-    const up=event=>finishDrag(event,false), cancel=event=>finishDrag(event,true), leave=()=>{if(!drag)hideTooltip();};
+    const up=event=>finishDrag(event,false), cancel=event=>finishDrag(event,true), leave=()=>{if(!drag&&!panDrag)hideTooltip();};
     svg.addEventListener('pointerdown',pointerDown);svg.addEventListener('pointermove',pointerMove);svg.addEventListener('pointerup',up);svg.addEventListener('pointercancel',cancel);svg.addEventListener('pointerleave',leave);
     const observer=typeof ResizeObserver!=='undefined'?new ResizeObserver(entries=>{
       const width=Math.round(entries[0].contentRect.width);
