@@ -9,11 +9,13 @@
   let state = {beats: [], options: {...DEFAULTS}, media: null, duration: 0, selectedId: null};
   let analysis = TempoAnalysis.analyze([], state.options);
   let sourceURL = null, hasMedia = false, peaks = null, loadToken = 0;
+  let yRange=null;
   let viewStart = 0, viewEnd = 30, clock = 0, pendingBreak = false, lastTapId = null;
   let undoStack = [], redoStack = [], savedTimer = null, toastTimer = null, pulseTimer = null;
   let renderFrame = 0, playbackFrame = 0, previousUiTime = 0, page = 0, relinkRequested = false;
   let confirmation = null, fallbackId = 0, autosaveFailed = false;
   let analysisWorker=null, workerDisabled=false, workerRunning=false, workerPending=null, analysisRevision=0, analysisBusy=false;
+  let audioExportController=null,audioExportMode='mix',audioExportGeneration=0;
   let currentFile=null,detectionController=null,detectionResult=null,detectionRunning=false,detectionGeneration=0,editRevision=0;
   const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
   const number = v => typeof v === 'number' && Number.isFinite(v);
@@ -110,13 +112,18 @@
   }
   function currentTime() { return hasMedia && number(media.currentTime) ? media.currentTime : clock; }
   function extent() { return Math.max(state.duration || 0, state.beats.at(-1)?.time || 0, .1); }
-  function graphState() { return {beats: state.beats, analysis, peaks, duration: extent(), currentTime: currentTime(), viewStart, viewEnd, selectedId: state.selectedId, showRaw: $('showRaw').checked, showSmooth: $('showSmooth').checked}; }
+  function graphState() { return {beats: state.beats, analysis, peaks, duration: extent(), currentTime: currentTime(), viewStart, viewEnd, selectedId: state.selectedId, showRaw: $('showRaw').checked, showSmooth: $('showSmooth').checked,yRange}; }
   const callbacks = {onSeek: time => seekTo(time), onSelectBeat: id => selectBeat(id), onMoveBeat: (id,time) => moveBeat(id, time)};
-  const chart = TempoCharts.createTempoChart($('tempoChart'), callbacks);
-  const wave = TempoCharts.createWaveform($('waveform'), callbacks);
+  const chart = TempoCharts.createTempoChart($('tempoChart'), {...callbacks,onInspectBeat:inspectBeat,onScale:scale=>{
+    if(document.activeElement!==$('bpmMin'))$('bpmMin').value=String(Math.round(scale.min*100)/100);
+    if(document.activeElement!==$('bpmMax'))$('bpmMax').value=String(Math.round(scale.max*100)/100);
+    $('yAuto').setAttribute('aria-pressed',String(!yRange));
+    $('scaleClipped').hidden=!scale.clipped;$('scaleClipped').textContent=scale.clipped+' fuori scala';
+  }});
+  const wave = TempoCharts.createWaveform($('waveform'), {onSeek:time=>seekTo(time)});
   const clickTrack=globalThis.TempoClicks?.create(media);
 
-  function renderCharts() { const data = graphState(); chart.render(data); wave.render(data); }
+  function renderCharts() { const data = graphState(); chart.render(data); wave.render({...data,viewStart:0,viewEnd:extent(),detailStart:viewStart,detailEnd:viewEnd}); }
   function requestChartRender() {
     if (renderFrame) return;
     renderFrame = requestAnimationFrame(() => { renderFrame = 0; renderCharts(); });
@@ -225,12 +232,29 @@
     const total = extent(), span = viewEnd-viewStart;
     $('viewLabel').textContent = `${formatTime(viewStart)} — ${formatTime(viewEnd)}`;
     $('pan').max = String(Math.max(0,total-span)); $('pan').value = String(viewStart); $('pan').disabled = span >= total-.001;
-    $('zoomOut').disabled = span >= total-.001; $('zoomIn').disabled = span <= Math.min(2,total)+.001;
+    $('zoomOut').disabled = span >= total-.001; $('zoomIn').disabled = span <= Math.min(.25,total)+.001;$('focusBeat').disabled=!state.selectedId;
   }
   function zoom(factor) {
-    const total = extent(), span=clamp((viewEnd-viewStart)*factor,Math.min(2,total),total);
-    const center = currentTime() >= viewStart && currentTime() <= viewEnd ? currentTime() : (viewStart+viewEnd)/2;
+    const total = extent(), span=clamp((viewEnd-viewStart)*factor,Math.min(.25,total),total);
+    const selected=state.beats.find(b=>b.id===state.selectedId);
+    const center = selected&&selected.time>=viewStart&&selected.time<=viewEnd?selected.time:currentTime() >= viewStart && currentTime() <= viewEnd ? currentTime() : (viewStart+viewEnd)/2;
     viewStart = clamp(center-span/2,0,total-span); viewEnd=viewStart+span; updateViewControls(); renderCharts();
+  }
+  function inspectBeat(id){
+    selectBeat(id);const index=state.beats.findIndex(b=>b.id===id);if(index<0)return;
+    const beat=state.beats[index],a=state.beats[Math.max(0,index-4)].time,b=state.beats[Math.min(state.beats.length-1,index+4)].time;
+    const span=clamp(b-a+1,Math.min(.5,extent()),Math.min(12,extent()));
+    viewStart=clamp(beat.time-span/2,0,extent()-span);viewEnd=viewStart+span;updateViewControls();renderCharts();
+  }
+  function zoomVertical(factor){
+    const scale=chart.getScale();if(!scale)return;
+    const center=(scale.min+scale.max)/2,span=clamp((scale.max-scale.min)*factor,2,120000);
+    yRange={min:Math.max(0,center-span/2),max:Math.max(span,center+span/2)};renderCharts();
+  }
+  function setVerticalRange(){
+    const min=$('bpmMin').valueAsNumber,max=$('bpmMax').valueAsNumber;
+    if(!number(min)||!number(max)||min<0||max<=min){toast('Inserisci un intervallo BPM valido.',true);renderCharts();return;}
+    yRange={min,max};renderCharts();
   }
   function fitView() { viewStart=0; viewEnd=extent(); updateViewControls(); renderCharts(); }
   function updateClock() {
@@ -322,12 +346,12 @@
   }
   function unloadMedia() {
     if($('beatModeDialog').open)$('beatModeDialog').close();
-    cancelDetection(); currentFile=null;globalThis.TempoDetectionClient?.clear();clickTrack?.reset();
+    cancelAudioExport();cancelDetection(); currentFile=null;globalThis.TempoDetectionClient?.clear();clickTrack?.reset();
     media.pause(); hasMedia=false; media.removeAttribute('src'); media.load(); media.hidden=true;
     if (sourceURL) URL.revokeObjectURL(sourceURL); sourceURL=null; peaks=null;
   }
   function adoptProject(project) {
-    ++loadToken; unloadMedia(); state=project; clock=0; undoStack=[]; redoStack=[]; lastTapId=null; pendingBreak=false;
+    ++loadToken; unloadMedia(); state=project; yRange=null; clock=0; undoStack=[]; redoStack=[]; lastTapId=null; pendingBreak=false;
     analysis=TempoAnalysis.analyze([],state.options);
     viewStart=0; viewEnd=extent(); $('waveStatus').textContent=''; changed();
   }
@@ -365,7 +389,7 @@
       if (!relink) {
         state={beats:demoData?.beats || [],options:{...DEFAULTS},duration,selectedId:null,media:null};
         analysis=TempoAnalysis.analyze([],state.options);
-        undoStack=[]; redoStack=[]; viewStart=0; viewEnd=duration;
+        undoStack=[]; redoStack=[]; yRange=null; viewStart=0; viewEnd=duration;
       }
       state.duration=duration;
       state.media={name:file.name,size:file.size,type:file.type,kind:isVideo?'video':'audio',demo:!!demoData};
@@ -419,6 +443,46 @@
   function baseName() { return (state.media?.name || 'tempo-trace').replace(/\.[^.]+$/,'').replace(/[^\p{L}\p{N} _.-]/gu,'_').slice(0,100); }
   function csv(rows) { return '\ufeff'+rows.map(row=>row.map(cell=>'"'+String(cell??'').replaceAll('"','""')+'"').join(';')).join('\r\n'); }
   function exportProject() { persist(); download(JSON.stringify(payload(),null,2),baseName()+'.tempo.json','application/json'); toast('Progetto esportato.'); }
+  function exportRange(scope){return scope==='view'?{start:viewStart,end:Math.min(viewEnd,extent())}:{start:0,end:extent()};}
+  async function exportGraphic(format){
+    const {start,end}=exportRange($('exportScope').value),beats=state.beats.filter(b=>b.time>=start&&b.time<=end).map(b=>({...b}));
+    if(!beats.length)return toast('Nessun beat nel tratto scelto.',true);
+    const result=TempoAnalysis.analyze(beats,state.options),scale=TempoCharts.tempoScale(result.intervals,$('exportScope').value==='view'?yRange:null);
+    const report=TempoReport.create({title:state.media?.name,duration:state.duration,beats,analysis:result},{start,end,scale}),filename=baseName()+'.grafico.'+format;
+    $('savePng').disabled=true;$('saveSvg').disabled=true;
+    try{const content=format==='png'?await TempoExportClient.png(report.svg,report.width,report.height):report.svg;download(content,filename,format==='png'?'image/png':'image/svg+xml');}
+    catch(error){toast(error.message||'Esportazione non riuscita.',true);}
+    finally{$('savePng').disabled=false;$('saveSvg').disabled=false;}
+  }
+  function cancelAudioExport(){
+    audioExportGeneration++;audioExportController?.abort();audioExportController=null;
+    $('audioExportProgress').hidden=true;$('audioExportOptions').hidden=false;$('startAudioExport').disabled=false;
+  }
+  function openAudioExport(mode){
+    audioExportMode=mode;cancelAudioExport();$('audioExportError').hidden=true;
+    $('audioExportTitle').textContent=mode==='mix'?'Audio + beat':'Solo beat';
+    $('audioExportScope').value=$('exportScope').value;
+    $('exportMusicRow').hidden=mode!=='mix';$('exportBalanceRow').hidden=mode!=='mix';$('exportRateRow').hidden=mode==='mix';
+    $('exportMusicVolume').value=$('volume').value;$('exportClickVolume').value=String(Number($('clickVolume').value)*Number($('volume').value));
+    $('exportBalance').checked=$('clickAuto').checked;$('exportRate').value='1';
+    $('exportDialog').close();showDialog('audioExportDialog');
+  }
+  async function exportAudio(){
+    if(audioExportController)return;
+    const range=exportRange($('audioExportScope').value),file=currentFile,beats=state.beats.map(b=>({...b})),rate=audioExportMode==='mix'?1:Number($('exportRate').value);
+    $('audioExportError').hidden=true;
+    if(!beats.some(b=>b.time>=range.start&&b.time<=range.end)){$('audioExportError').textContent='Nessun beat nel tratto scelto.';$('audioExportError').hidden=false;return;}
+    const name=baseName()+(audioExportMode==='mix'?'.audio-beat':'.beat')+(rate!==1?'.'+rate+'x':'')+'.wav';
+    audioExportController=new AbortController();const generation=++audioExportGeneration;
+    $('audioExportOptions').hidden=true;$('audioExportProgress').hidden=false;$('startAudioExport').disabled=true;$('audioExportBar').value=0;
+    try{
+      const blob=await TempoExportClient.audio(file,{...range,duration:state.duration,beats,mode:audioExportMode,rate,musicVolume:Number($('exportMusicVolume').value),clickVolume:Number($('exportClickVolume').value),autoBalance:$('exportBalance').checked},update=>{
+        if(generation!==audioExportGeneration)return;$('audioExportBar').value=update.progress;$('audioExportStage').textContent=update.stage+' · '+Math.round(update.progress*100)+'%';
+      },audioExportController.signal);
+      if(generation!==audioExportGeneration)return;download(blob,name,'audio/wav');$('audioExportDialog').close();
+    }catch(error){if(generation===audioExportGeneration&&error.name!=='AbortError'){$('audioExportError').textContent=error.message||'Esportazione non riuscita.';$('audioExportError').hidden=false;}}
+    finally{if(generation===audioExportGeneration){audioExportController=null;$('audioExportOptions').hidden=false;$('audioExportProgress').hidden=true;$('startAudioExport').disabled=false;}}
+  }
   function renderBeatTable() {
     const pageSize=80, pageCount=Math.max(1,Math.ceil(state.beats.length/pageSize)); page=clamp(page,0,pageCount-1);
     const intervals=new Map(analysis.intervals.map(i=>[i.beatId,i])); $('beatTable').replaceChildren();
@@ -581,6 +645,10 @@
   $('undoButton').addEventListener('click',undo); $('redoButton').addEventListener('click',redo);
   $('zoomIn').addEventListener('click',()=>zoom(.5)); $('zoomOut').addEventListener('click',()=>zoom(2)); $('fitView').addEventListener('click',fitView);
   $('pan').addEventListener('input',e=>{const span=viewEnd-viewStart;viewStart=Number(e.target.value);viewEnd=viewStart+span;updateViewControls();requestChartRender();});
+  $('focusBeat').addEventListener('click',()=>inspectBeat(state.selectedId));
+  $('yZoomIn').addEventListener('click',()=>zoomVertical(.65));$('yZoomOut').addEventListener('click',()=>zoomVertical(1.5));
+  $('bpmMin').addEventListener('change',setVerticalRange);$('bpmMax').addEventListener('change',setVerticalRange);
+  $('yAuto').addEventListener('click',()=>{yRange=null;renderCharts();});
   $('showRaw').addEventListener('change',requestChartRender); $('showSmooth').addEventListener('change',requestChartRender);
   $('previousBeat').addEventListener('click',()=>{const i=state.beats.findIndex(b=>b.id===state.selectedId);if(i>0)selectBeat(state.beats[i-1].id,true);});
   $('nextBeat').addEventListener('click',()=>{const i=state.beats.findIndex(b=>b.id===state.selectedId);if(i<state.beats.length-1)selectBeat(state.beats[i+1].id,true);});
@@ -600,7 +668,10 @@
   $('saveProject').addEventListener('click',exportProject);
   $('saveBeats').addEventListener('click',()=>{const map=new Map(analysis.intervals.map(i=>[i.beatId,i]));download(csv([['beat','secondi','BPM_semiminima','tendenza_BPM','interruzione_prima','fermata_confermata','agogica','segnalazione','origine','supporto_rilevamento','interpolato'],...state.beats.map((b,i)=>{const interval=map.get(b.id);return[i+1,b.time.toFixed(3),interval?.bpm.toFixed(4),interval?.smoothed?.toFixed(4),b.breakBefore?'si':'no',b.fermataBefore?'si':'no',interval?.expressive||'',interval?.anomaly||'',b.source||'manual',number(b.confidence)?b.confidence.toFixed(4):'',b.inferred?'si':'no'];})]),baseName()+'.beat.csv','text/csv;charset=utf-8');});
   $('saveSections').addEventListener('click',()=>download(csv([['sezione','inizio_secondi','fine_secondi','BPM_medio_semiminima','intervalli'],...analysis.sections.map((s,i)=>[i+1,s.start.toFixed(3),s.end.toFixed(3),s.bpm.toFixed(4),s.count])]),baseName()+'.sezioni.csv','text/csv;charset=utf-8'));
-  $('saveSvg').addEventListener('click',()=>download(chart.exportSVG(),baseName()+'.grafico.svg','image/svg+xml'));
+  $('saveSvg').addEventListener('click',()=>exportGraphic('svg'));$('savePng').addEventListener('click',()=>exportGraphic('png'));
+  $('saveMix').addEventListener('click',()=>openAudioExport('mix'));$('saveClicks').addEventListener('click',()=>openAudioExport('clicks'));
+  $('audioExportForm').addEventListener('submit',e=>{e.preventDefault();if($('audioExportForm').reportValidity())exportAudio();});
+  $('cancelAudioExport').addEventListener('click',cancelAudioExport);$('audioExportDialog').addEventListener('close',cancelAudioExport);
 
   document.addEventListener('keydown',e=>{
     if(e.code==='Escape')hideTooltip();

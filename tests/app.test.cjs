@@ -19,16 +19,16 @@ function boot(storageEntries = [], overrides = {}) {
   const document = createDOM(html), window = new Element('window'), storage = new Map(storageEntries);
   let nextId = 0, taskId = 0;
   const charts = [];
-  const createChart = () => {const chart = {render(data) {this.latest = data;}, setPlayhead(time) {this.time = time;}, exportSVG() {return '<svg/>';}}; charts.push(chart); return chart;};
+  const createChart = (svg, callbacks) => {const chart = {render(data) {this.latest = data;callbacks?.onScale?.({...this.getScale(),clipped:0});}, getScale(){return this.latest?.yRange||{min:80,max:120};}, setPlayhead(time) {this.time = time;}, exportSVG() {return '<svg/>';}}; charts.push(chart); return chart;};
   const context = vm.createContext({document, window, TempoAnalysis,
-    TempoCharts: {createTempoChart: createChart, createWaveform: createChart},
+    TempoCharts: {createTempoChart: createChart, createWaveform: createChart,tempoScale:()=>({min:80,max:160})},
     crypto: {randomUUID: () => 'generated-' + ++nextId},
     localStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value)},
     setTimeout: () => ++taskId, clearTimeout() {}, requestAnimationFrame: () => ++taskId, cancelAnimationFrame() {},
     URL: {revokeObjectURL() {}, createObjectURL: () => 'blob:test'}, Blob, AbortController, console, ...overrides});
   // Expose only in this VM copy. Production app remains a closed IIFE.
   const hook = `globalThis.app = {validateProject, adoptProject, loadProject, loadFile, tap, moveBeat, removeSelected,
-    selectBeat, undo, redo, seekTo, persist, payload, snapshot, openDetection, runDetection, applyDetection, cancelDetection,
+    selectBeat, undo, redo, seekTo, persist, payload, snapshot, openDetection, runDetection, applyDetection, cancelDetection, exportGraphic, exportAudio,
     attachFile(file = {name:'piano.wav',size:1234}) {currentFile = file;}, setView(start, end) {viewStart=start;viewEnd=end;},
     stubProbe(duration=30) {probeFile=async()=>duration;},
     attachMedia() {hasMedia = true;}, get state() {return state;}, get analysis() {return analysis;},
@@ -443,4 +443,26 @@ test('a fresh import offers automatic or manual marking; relinking a saved proje
   await restored.api.loadFile(file,true);
   assert.equal(restored.$('beatModeDialog').open,false);
   assert.equal(restored.api.state.beats.length,3);
+});
+
+test('vertical zoom, explicit BPM limits and Auto operate independently from the temporal window',()=>{
+ const h=boot();h.open(project([0,.5,1,1.5,2]));h.api.setView(.5,2);
+ h.$('yZoomIn').click();assert.deepEqual(plain(h.charts[0].latest.yRange),{min:87,max:113});assert.equal(h.charts[0].latest.viewStart,.5);
+ h.$('bpmMin').value='90';h.$('bpmMax').value='150';h.$('bpmMax').dispatch('change');assert.deepEqual(plain(h.charts[0].latest.yRange),{min:90,max:150});
+ h.$('yAuto').click();assert.equal(h.charts[0].latest.yRange,null);assert.equal(h.charts[0].latest.viewEnd,2);
+});
+test('graphic export uses the selected excerpt with its own BPM statistics',async()=>{
+ let report;
+ const h=boot([],{TempoReport:{create(project,options){report={project,options};return {svg:'<svg/>',width:1440,height:856};}}});
+ h.open(project([0,.5,1,1.5,2,3,4]));h.api.setView(1.5,4);h.$('exportScope').value='view';await h.api.exportGraphic('svg');
+ assert.deepEqual(plain(report.project.beats.map(b=>b.time)),[1.5,2,3,4]);assert.equal(report.options.start,1.5);assert.equal(report.options.end,4);assert.equal(report.project.analysis.stats.mean,72);
+ assert.equal(h.$('saveSvg').disabled,false);
+});
+test('audio dialog exports click-only excerpts without a linked source and ignores completion after cancellation',async()=>{
+ let pending,downloads=0;
+ const h=boot([],{TempoExportClient:{audio(file,options,progress,signal){return new Promise(resolve=>pending={file,options,signal,resolve});}},URL:{revokeObjectURL(){},createObjectURL(){downloads++;return 'blob:download';}}});
+ h.open(project([0,.5,1,1.5,2,3,4]));h.api.setView(1,3);h.$('exportScope').value='view';h.$('saveClicks').click();h.$('exportRate').value='.75';
+ assert.equal(h.$('audioExportDialog').open,true);assert.equal(h.$('exportMusicRow').hidden,true);assert.equal(h.$('exportRateRow').hidden,false);
+ const promise=h.api.exportAudio();assert.equal(pending.file,null);assert.equal(pending.options.rate,.75);assert.equal(pending.options.start,1);assert.equal(pending.options.end,3);
+ h.$('audioExportDialog').close();assert.ok(pending.signal.aborted);pending.resolve(new Blob(['stale']));await promise;assert.equal(downloads,0);assert.equal(h.$('startAudioExport').disabled,false);
 });

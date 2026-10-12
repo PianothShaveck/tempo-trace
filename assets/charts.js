@@ -45,10 +45,23 @@
     if (low === items.length) return items.length - 1;
     return Math.abs(getTime(items[low]) - value) < Math.abs(getTime(items[low - 1]) - value) ? low : low - 1;
   }
+  function tempoScale(intervals, limits) {
+    const values=intervals.flatMap(p=>[p.bpm,p.smoothed]).filter(v=>finite(v)&&Number(v)>0).map(Number).sort((a,b)=>a-b);
+    let low=values[0]??60, high=values.at(-1)??120;
+    if(values.length>=12){
+      const q10=values[Math.floor((values.length-1)*.1)],q90=values[Math.ceil((values.length-1)*.9)];
+      const margin=Math.max((q90-q10)*2,q90*.25,8);
+      low=Math.max(low,q10-margin);high=Math.min(high,q90+margin);
+    }
+    const pad=Math.max((high-low)*.16,high*.035,4),step=stepSize(high-low+2*pad,5);
+    let min=Math.max(0,Math.floor((low-pad)/step)*step),max=Math.ceil((high+pad)/step)*step;
+    if(limits&&finite(limits.min)&&finite(limits.max)&&limits.max>limits.min){min=Number(limits.min);max=Number(limits.max);}
+    return {min,max,step:stepSize(max-min,5),clipped:intervals.filter(p=>p.bpm<min||p.bpm>max).length};
+  }
   function create(svg, callbacks, waveform) {
     callbacks = callbacks || {};
     const serial = ++chartSerial;
-    let state = {}, geometry = null, points = [], visibleBeats = [], anchors = [], intervalsByBeat = new Map(), beatsById = new Map(), drag = null, disposed = false;
+    let state = {}, geometry = null, points = [], visibleBeats = [], intervalsByBeat = new Map(), beatsById = new Map(), drag = null, disposed = false;
     let playhead = null, playheadDot = null, tooltip = null, tooltipText = null, tooltipBox = null, dragGhost = null;
     let resizeFrame = null, lastWidth = 0;
     const titleId = `tempo-chart-title-${serial}`, descriptionId = `tempo-chart-desc-${serial}`;
@@ -112,33 +125,24 @@
       const rect = svg.getBoundingClientRect();
       const width = Math.max(waveform ? 120 : 320, Math.round(rect.width || svg.clientWidth || 1100));
       lastWidth = Math.round(rect.width);
-      const height = waveform ? Math.max(56, Math.round(rect.height || 112)) : (width < 560 ? 272 : 320);
-      const left = waveform ? 14 : 49, right = 18, top = waveform ? 9 : 34, bottom = waveform ? 23 : 31;
+      const height = waveform ? Math.max(56, Math.round(rect.height || 112)) : (width < 560 ? 350 : 420);
+      if(!waveform)svg.style.height=height+'px';
+      const left = waveform ? 14 : 49, right = 18, top = waveform ? 9 : 34, bottom = waveform ? 23 : 90;
       const start = Math.max(0, Number(state.viewStart) || 0);
       const end = Math.max(start + .05, Number(state.viewEnd) || Number(state.duration) || 30);
       const plotWidth = width-left-right, plotHeight = height-top-bottom;
       const x = value => left + (value-start)/(end-start)*plotWidth;
       let rawPoints = (state.analysis && state.analysis.intervals || []).filter(item => finite(item.bpm) && Number(item.bpm)>0 && finite(item.end));
       const inView = rawPoints.filter(item => Number(item.end)>=start && Number(item.end)<=end);
-      // Keep the scale stable when toggling lines, and retain off-trend anomaly markers.
-      let min = Infinity, max = -Infinity;
-      inView.forEach(item => {
-        min = Math.min(min, Number(item.bpm)); max = Math.max(max, Number(item.bpm));
-        if (finite(item.smoothed)) { min = Math.min(min, Number(item.smoothed)); max = Math.max(max, Number(item.smoothed)); }
-      });
-      if (!inView.length) { min = 60; max = 120; }
-      const padding = Math.max((max-min)*.14, max*.055, 4);
-      const yStep = stepSize(max-min+padding*2,4);
-      min = Math.max(0,Math.floor((min-padding)/yStep)*yStep);
-      max = Math.ceil((max+padding)/yStep)*yStep;
-      if (max<=min) max=min+10;
+      const scale=tempoScale(inView,state.yRange),min=scale.min,max=scale.max,yStep=scale.step;
       const y = value => top + (max-value)/(max-min)*plotHeight;
-      geometry = {width,height,left,right,top,bottom,start,end,plotWidth,plotHeight,x,y};
+      geometry = {width,height,left,right,top,bottom,start,end,plotWidth,plotHeight,x,y,min,max,laneY:height-50};
+      if(!waveform&&callbacks.onScale)callbacks.onScale(scale);
       svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio','xMidYMid meet');
       svg.replaceChildren();
-      svg.append(node('title',{id:titleId},waveform ? 'Forma d’onda e posizioni dei beat' : 'Andamento dei BPM nel tempo'));
-      svg.append(node('desc',{id:descriptionId},waveform ? 'Seleziona un beat per correggerlo. Trascina per spostarlo; clicca uno spazio libero per raggiungere quel punto. Le correzioni sono disponibili anche nei controlli numerici.' : 'BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. I cerchi vuoti viola indicano beat automatici da rivedere. Clicca per raggiungere un punto o trascina un beat per correggerlo. Le correzioni sono disponibili anche nei controlli numerici.'));
+      svg.append(node('title',{id:titleId},waveform ? 'Forma d’onda e posizione di ascolto' : 'Andamento dei BPM nel tempo'));
+      svg.append(node('desc',{id:descriptionId},waveform ? 'Clicca sulla traccia per spostare la riproduzione. Questa traccia non modifica i beat.' : 'BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. I cerchi vuoti viola indicano beat automatici da rivedere. La riga Beat rende visibili tutte le posizioni. Seleziona un beat, poi trascinalo per correggerlo. Se i punti sono ravvicinati, il clic li ingrandisce. Le correzioni sono disponibili anche nei controlli numerici.'));
       svg.append(node('rect',{width,height,fill:palette.bg,rx:12}));
       const defs = node('defs');
       const clip = node('clipPath',{id:`tempo-clip-${serial}`});
@@ -159,7 +163,8 @@
             svg.append(label(x(a)+7+(number.length>1 ? 12:10),21,number,{'text-anchor':'middle',fill:palette.text,'font-size':10}));
           }
         });
-        for (let value=min;value<=max+yStep*.001;value+=yStep) {
+        for (let tick=0;tick<=6;tick++) {
+          const value=min+tick*yStep;if(value>max+yStep*.001)break;
           svg.append(node('line',{x1:left,x2:width-right,y1:y(value),y2:y(value),stroke:palette.grid,'stroke-width':1}));
           svg.append(label(left-10,y(value)+4,String(Math.round(value*10)/10),{'text-anchor':'end'}));
         }
@@ -180,14 +185,13 @@
       visibleBeats=(state.beats || []).filter(beat => finite(beat.time) && Number(beat.time)>=start && Number(beat.time)<=end);
       points=inView;
       intervalsByBeat = new Map(rawPoints.map(interval => [String(interval.beatId), interval]));
-      anchors = waveform ? [] : visibleBeats.filter(beat => !intervalsByBeat.has(String(beat.id)));
       if (waveform) drawWaveform(plot);
-      else drawTempo(plot,rawPoints);
-      playhead=node('line',{x1:0,x2:0,y1:top-6,y2:height-bottom,stroke:palette.text,'stroke-opacity':.75,'stroke-width':1.4,'pointer-events':'none'});
+      else {drawTempo(plot,rawPoints);drawBeatLane();}
+      playhead=node('line',{x1:0,x2:0,y1:top-6,y2:waveform?height-bottom:height-29,stroke:palette.text,'stroke-opacity':.75,'stroke-width':1.4,'pointer-events':'none'});
       playheadDot=node('circle',{cx:0,cy:top-5,r:3,fill:palette.text,'pointer-events':'none'});
       svg.append(playhead,playheadDot);
       dragGhost=node('g',{visibility:'hidden','pointer-events':'none'});
-      dragGhost.append(node('line',{y1:top-5,y2:height-bottom,stroke:palette.text,'stroke-width':1.5,'stroke-dasharray':'3 3'})); svg.append(dragGhost);
+      dragGhost.append(node('line',{y1:top-5,y2:waveform?height-bottom:height-29,stroke:palette.text,'stroke-width':1.5,'stroke-dasharray':'3 3'})); svg.append(dragGhost);
       tooltip=node('g',{visibility:'hidden','pointer-events':'none','aria-hidden':'true'});
       tooltipBox=node('rect',{height:29,rx:7,fill:'#1b2a36',stroke:'#3a5061','stroke-width':1});
       tooltipText=label(10,19,'',{fill:palette.text,'font-size':11}); tooltip.append(tooltipBox,tooltipText); svg.append(tooltip);
@@ -244,15 +248,23 @@
       }
       if(state.showRaw!==false) plot.append(node('path',{d:pathFor('bpm'),fill:'none',stroke:palette.violet,'stroke-opacity':.73,'stroke-width':1.5,'stroke-linecap':'round','stroke-linejoin':'round'}));
       if(state.showSmooth!==false) plot.append(node('path',{d:pathFor('smoothed'),fill:'none',stroke:`url(#tempo-gradient-${serial})`,'stroke-width':2.7,'stroke-linecap':'round','stroke-linejoin':'round'}));
-      if(points.length<110 && state.showRaw!==false) for(const p of points) {
-        if (!isLowAutomatic(beatsById.get(String(p.beatId)))) plot.append(node('circle',{cx:g.x(Number(p.end)),cy:g.y(Number(p.bpm)),r:2.5,fill:palette.violet,opacity:.7}));
+      if(state.showRaw!==false){
+        const marks=[],seen=new Set();
+        for(const p of points){
+          if(p.anomaly||isHold(p)||isLowAutomatic(beatsById.get(String(p.beatId))))continue;
+          const px=g.x(p.end),py=markerY(p.bpm),key=Math.round(px)+','+Math.round(py);
+          if(seen.has(key))continue;seen.add(key);
+          const r=points.length>g.plotWidth/7?2:3.5;
+          marks.push(`M${px+r},${py}a${r},${r} 0 1,0 ${-2*r},0a${r},${r} 0 1,0 ${2*r},0Z`);
+        }
+        if(marks.length)plot.append(node('path',{d:marks.join(' '),fill:palette.violet,stroke:palette.bg,'stroke-width':1}));
       }
       // Review markers use every original point, independently of line decimation.
       // One compound path avoids thousands of DOM nodes on dense automatic tracks.
       const reviewGlyphs=[],reviewPixels=new Set();
       for (const p of points) {
         if (p.anomaly || isHold(p) || String(p.beatId)===String(state.selectedId) || !isLowAutomatic(beatsById.get(String(p.beatId)))) continue;
-        const px=g.x(Number(p.end)),py=g.y(Number(p.bpm)),pixel=Math.round(px)+','+Math.round(py);
+        const px=g.x(Number(p.end)),py=markerY(Number(p.bpm)),pixel=Math.round(px)+','+Math.round(py);
         if(reviewPixels.has(pixel)) continue; reviewPixels.add(pixel);
         reviewGlyphs.push(`M${(px+4.1).toFixed(2)},${py.toFixed(2)}a4.1,4.1 0 1,0 -8.2,0a4.1,4.1 0 1,0 8.2,0Z`);
       }
@@ -262,12 +274,12 @@
       }
       const anomalies=points.filter(p=>p.anomaly && !isHold(p));
       for(const p of anomalies) {
-        const px=g.x(Number(p.end)), py=g.y(Number(p.bpm));
+        const px=g.x(Number(p.end)), py=markerY(Number(p.bpm));
         plot.append(node('circle',{cx:px,cy:py,r:5.3,fill:palette.bg,stroke:palette.amber,'stroke-width':1.8}));
         plot.append(node('circle',{cx:px,cy:py,r:1.6,fill:palette.amber}));
       }
       for (const p of points.filter(isHold)) {
-        const px=g.x(Number(p.end)), py=g.y(Number(p.bpm)), confirmed=p.expressive==='fermata';
+        const px=g.x(Number(p.end)), py=markerY(Number(p.bpm)), confirmed=p.expressive==='fermata';
         const diamond=node('path',{d:`M${px},${py-6}L${px+6},${py}L${px},${py+6}L${px-6},${py}Z`,fill:confirmed?palette.lavender:palette.bg,stroke:palette.lavender,'stroke-width':1.8});
         diamond.append(node('title',null,expressionNames[p.expressive])); plot.append(diamond);
       }
@@ -283,20 +295,35 @@
         group.append(label((g.x(a)+g.x(b))/2,g.top+8,confirmed?'Fermata':'Fermata?',{'text-anchor':'middle',fill:palette.lavender,'font-size':10}));
         plot.append(group);
       }
-      // Group starts have no preceding interval and therefore no BPM. Keep them
-      // editable with a baseline handle instead of inventing a tempo value.
-      for (const beat of anchors) {
-        const selected = String(beat.id) === String(state.selectedId), px = g.x(Number(beat.time));
-        if (selected) plot.append(node('line',{x1:px,x2:px,y1:g.top,y2:g.height-g.bottom,stroke:palette.teal,'stroke-opacity':.3,'stroke-dasharray':'3 4'}));
-        plot.append(node('rect',{x:px-4,y:g.height-g.bottom-10,width:8,height:8,rx:2,fill:palette.bg,stroke:selected?palette.teal:palette.violet,'stroke-width':selected?2.2:1.5,'stroke-dasharray':!selected&&isLowAutomatic(beat)?'2 2':null}));
+      for(const p of points.filter(p=>p.bpm<g.min||p.bpm>g.max)){
+        const px=g.x(p.end),py=markerY(p.bpm),direction=p.bpm>g.max?-1:1;
+        plot.append(node('path',{d:`M${px},${py+direction*5}L${px-5},${py-direction*3}H${px+5}Z`,fill:palette.amber}));
       }
       const selected=points.find(p=>String(p.beatId)===String(state.selectedId));
       if(selected) {
-        const px=g.x(Number(selected.end)),py=g.y(Number(selected.bpm));
+        const px=g.x(Number(selected.end)),py=markerY(Number(selected.bpm));
         plot.append(node('line',{x1:px,x2:px,y1:g.top,y2:g.height-g.bottom,stroke:palette.teal,'stroke-opacity':.4,'stroke-dasharray':'3 4'}));
         plot.append(node('circle',{cx:px,cy:py,r:7,fill:palette.bg,stroke:palette.teal,'stroke-width':2.3}));
         plot.append(node('circle',{cx:px,cy:py,r:2.5,fill:palette.text}));
       }
+    }
+    function markerY(bpm){return clamp(geometry.y(bpm),geometry.top+7,geometry.height-geometry.bottom-7);}
+    function drawBeatLane(){
+      const g=geometry,lane=node('g',{'data-beat-lane':'true'});
+      lane.append(node('rect',{x:g.left,y:g.laneY-20,width:g.plotWidth,height:44,rx:6,fill:'#192735'}));
+      lane.append(label(g.left-8,g.laneY+4,'Beat',{'text-anchor':'end','font-size':10}));
+      const marks={normal:[],review:[]},seen=new Set();
+      const all=state.beats||[],first=all.findIndex(b=>b===visibleBeats[0]);
+      for(let i=0;i<visibleBeats.length;i++){
+        const beat=visibleBeats[i],px=g.x(beat.time),selected=String(beat.id)===String(state.selectedId),pixel=Math.round(px);
+        if(seen.has(pixel)&&!selected)continue;seen.add(pixel);
+        if(selected)lane.append(node('rect',{x:px-5,y:g.laneY-10,width:10,height:20,rx:3,fill:palette.teal,stroke:palette.text,'stroke-width':1,'data-selected-beat':beat.id}));
+        else marks[isLowAutomatic(beat)?'review':'normal'].push(`M${px},${g.laneY-7}V${g.laneY+7}`);
+        const gap=Math.min(i?px-g.x(visibleBeats[i-1].time):Infinity,i+1<visibleBeats.length?g.x(visibleBeats[i+1].time)-px:Infinity);
+        if(gap>34)lane.append(label(px,g.laneY+20,String(first+i+1),{'text-anchor':'middle','font-size':9,fill:selected?palette.teal:palette.muted}));
+      }
+      for(const kind of ['normal','review'])if(marks[kind].length)lane.append(node('path',{d:marks[kind].join(' '),stroke:palette.violet,'stroke-width':2,'stroke-dasharray':kind==='review'?'2 2':null,fill:'none'}));
+      svg.append(lane);
     }
     function drawWaveform(plot) {
       const g=geometry, center=g.top+g.plotHeight/2;
@@ -321,50 +348,25 @@
         }
         plot.append(node('path',{d:path,stroke:'#668d9a','stroke-width':1.2,'stroke-opacity':.78,fill:'none'}));
       }
-      // Batch same-style marks into paths: 50,000 beats must not create 50,000 nodes.
-      // Low-confidence and hold marks survive overview thinning; zoom reveals each beat.
-      let previousX=-Infinity, selectedX=null;
-      const marks={normal:[],review:[],hold:[],gap:[]};
-      const occupied={normal:new Set(),review:new Set(),hold:new Set(),gap:new Set()};
-      visibleBeats.forEach(beat=> {
-        const selected=String(beat.id)===String(state.selectedId),px=g.x(Number(beat.time));
-        const interval=intervalsByBeat.get(String(beat.id)),held=beat.fermataBefore || isHold(interval),review=isLowAutomatic(beat),suspicious=interval && interval.anomaly;
-        if(selected) {selectedX=px;return;}
-        if(!held && !review && !suspicious && !beat.breakBefore && px-previousX<1.3) return;
-        previousX=px;
-        const kind=held?'hold':(beat.breakBefore || suspicious)?'gap':review?'review':'normal';
-        const pixel=Math.round(px);
-        if(occupied[kind].has(pixel)) return; occupied[kind].add(pixel);
-        marks[kind].push(`M${px.toFixed(2)},${g.top+5}V${g.height-g.bottom-3}`);
-      });
-      for(const kind of ['normal','review','gap','hold']) if(marks[kind].length) plot.append(node('path',{d:marks[kind].join(' '),fill:'none',stroke:kind==='hold'?palette.lavender:kind==='gap'?palette.amber:palette.violet,'stroke-width':kind==='normal'?1:1.5,'stroke-opacity':kind==='normal'?.55:1,'stroke-dasharray':kind==='hold'?'3 3':kind==='review'?'2 3':null}));
-      if(selectedX!==null) {
-        plot.append(node('line',{x1:selectedX,x2:selectedX,y1:g.top+5,y2:g.height-g.bottom-3,stroke:palette.teal,'stroke-width':2.5}));
-        plot.append(node('circle',{cx:selectedX,cy:g.top+5,r:4,fill:palette.teal}));
+      if(finite(state.detailStart)&&finite(state.detailEnd)&&state.detailEnd-state.detailStart<g.end-g.start-.01){
+        plot.append(node('rect',{x:g.x(state.detailStart),y:g.top,width:Math.max(1,g.x(state.detailEnd)-g.x(state.detailStart)),height:g.plotHeight,fill:palette.teal,'fill-opacity':.08,stroke:palette.teal,'stroke-opacity':.5,'pointer-events':'none'}));
       }
     }
     function hit(point) {
       if(!geometry || point.x<geometry.left-8 || point.x>geometry.width-geometry.right+8) return null;
       const time=geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start);
-      if(waveform) {
-        if(!visibleBeats.length) return null;
+      if(waveform)return null;
+      let chosen=null,best=14;
+      if(visibleBeats.length&&Math.abs(point.y-geometry.laneY)<22){
         const beat=visibleBeats[nearestIndex(visibleBeats,time,p=>Number(p.time))];
-        return Math.abs(geometry.x(Number(beat.time))-point.x)<=9 ? {id:beat.id,time:Number(beat.time),y:geometry.top+geometry.plotHeight/2,beat} : null;
-      }
-      let chosen=null, best=22;
-      if (anchors.length) {
-        const beat = anchors[nearestIndex(anchors,time,p=>Number(p.time))], anchorY=geometry.height-geometry.bottom-6;
-        const distance = Math.hypot(geometry.x(Number(beat.time))-point.x, anchorY-point.y);
-        if (distance < 13) { best=distance; chosen={id:beat.id,time:Number(beat.time),y:anchorY,beat,anchor:true}; }
+        if(Math.abs(geometry.x(beat.time)-point.x)<12)return {id:beat.id,time:beat.time,y:geometry.laneY,beat,interval:intervalsByBeat.get(String(beat.id))};
       }
       if(!points.length) return chosen;
       const index=nearestIndex(points,time,p=>Number(p.end));
       for(let i=Math.max(0,index-2);i<=Math.min(points.length-1,index+2);i++) {
         const item=points[i], px=geometry.x(Number(item.end));
-        const rawY=geometry.y(Number(item.bpm));
-        const smoothY=finite(item.smoothed)?geometry.y(Number(item.smoothed)):rawY;
-        const py=state.showRaw===false?smoothY:rawY;
-        const distance=Math.hypot(px-point.x,Math.min(Math.abs(py-point.y),state.showSmooth===false?Infinity:Math.abs(smoothY-point.y)));
+        const rawY=markerY(Number(item.bpm));
+        const distance=state.showRaw===false?Infinity:Math.hypot(px-point.x,rawY-point.y);
         if(distance<best) {best=distance;chosen={id:item.beatId,time:Number(item.end),y:rawY,interval:item};}
       }
       return chosen;
@@ -372,13 +374,15 @@
     function pointerDown(event) {
       if(!geometry || event.button!==0 || !Number(state.duration)) return;
       const point=localPoint(event);
-      if(point.x<geometry.left || point.x>geometry.width-geometry.right || point.y<geometry.top-10 || point.y>geometry.height-geometry.bottom+5) return;
-      const found=hit(point);
+      if(point.x<geometry.left || point.x>geometry.width-geometry.right || point.y<geometry.top-10 || point.y>(waveform?geometry.height-geometry.bottom+5:geometry.laneY+23)) return;
+      const found=waveform?null:hit(point);
       if(found) {
         const beats=state.beats||[],index=beats.findIndex(b=>String(b.id)===String(found.id));
         const previous=index>0?Number(beats[index-1].time):0;
         const next=index>=0&&index<beats.length-1?Number(beats[index+1].time):Number(state.duration);
-        drag={id:found.id,originalTime:found.time,time:found.time,y:found.y,startX:point.x,startY:point.y,moved:false,pointerId:event.pointerId,min:previous+(index>0?.001:0),max:next-(index>=0&&index<beats.length-1?.001:0)};
+        const gap=Math.min(index>0?geometry.x(found.time)-geometry.x(previous):Infinity,index<beats.length-1?geometry.x(next)-geometry.x(found.time):Infinity);
+        const safety=Math.min(.08,Math.min(index>0?found.time-previous:Infinity,index<beats.length-1?next-found.time:Infinity)*.25);
+        drag={canMove:String(found.id)===String(state.selectedId)&&gap>=14,dense:gap<14,id:found.id,originalTime:found.time,time:found.time,y:found.y,startX:point.x,startY:point.y,moved:false,pointerId:event.pointerId,min:previous+(index>0?safety:0),max:next-(index>=0&&index<beats.length-1?safety:0)};
         svg.setPointerCapture(event.pointerId);
         event.preventDefault();
       } else {
@@ -390,15 +394,17 @@
       if(!geometry) return;
       const point=localPoint(event);
       if(drag) {
-        if(Math.abs(point.x-drag.startX)>3) drag.moved=true;
+        if(!drag.canMove)return;
+        if(Math.abs(point.x-drag.startX)>6) drag.moved=true;
         drag.time=clamp(geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start),drag.min,drag.max);
         const px=geometry.x(drag.time);
         if(drag.moved) {dragGhost.setAttribute('visibility','visible');dragGhost.setAttribute('transform',`translate(${px},0)`);}
-        showTooltip(px,drag.y,timeLabel(drag.time,true));
+        showTooltip(px,drag.y,timeLabel(drag.time,true)+' · '+Math.round((drag.time-drag.originalTime)*1000)+' ms');
         svg.style.cursor='ew-resize';
       } else {
+        if(waveform){const time=clamp(geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start),0,Number(state.duration));svg.style.cursor='pointer';showTooltip(point.x,geometry.top,timeLabel(time,true));return;}
         const found=hit(point);
-        svg.style.cursor=found?'ew-resize':'crosshair';
+        svg.style.cursor=found?(String(found.id)===String(state.selectedId)?'ew-resize':'pointer'):'crosshair';
         if(found) {
           const interval=found.interval || (waveform ? intervalsByBeat.get(String(found.id)) : null);
           const expression=interval && expressionNames[interval.expressive] || (found.beat && found.beat.fermataBefore ? 'Fermata' : '');
@@ -407,7 +413,7 @@
           const text=`${timeLabel(found.time,true)}${annotation ? ' · '+annotation : ''}${found.interval ? ' · '+Number(found.interval.bpm).toFixed(1)+' BPM' : ''}`;
           const beat=found.beat || beatsById.get(String(found.id));
           const automatic=isAutomatic(beat) ? (isLowAutomatic(beat) ? 'Automatico · da rivedere' : 'Automatico') : '';
-          showTooltip(geometry.x(found.time),found.y,text,automatic);
+          showTooltip(geometry.x(found.time),found.y,text,[automatic,String(found.id)===String(state.selectedId)?'Trascina per correggere':'Clic per selezionare'].filter(Boolean).join(' · '));
         } else hideTooltip();
       }
     }
@@ -419,7 +425,8 @@
       hideTooltip();svg.style.cursor='crosshair';
       if(!cancelled) {
         if(callbacks.onSelectBeat) callbacks.onSelectBeat(completed.id);
-        if(completed.moved && Math.abs(completed.time-completed.originalTime)>.0001 && callbacks.onMoveBeat) callbacks.onMoveBeat(completed.id,completed.time);
+        if(completed.dense&&callbacks.onInspectBeat)callbacks.onInspectBeat(completed.id);
+        if(completed.canMove&&completed.moved && Math.abs(completed.time-completed.originalTime)>.0001 && callbacks.onMoveBeat) callbacks.onMoveBeat(completed.id,completed.time);
       }
     }
     const up=event=>finishDrag(event,false), cancel=event=>finishDrag(event,true), leave=()=>{if(!drag)hideTooltip();};
@@ -431,6 +438,7 @@
     if(observer) observer.observe(svg);
     return {
       render,
+      getScale(){return geometry?{min:geometry.min,max:geometry.max}:null;},
       setPlayhead(time) {state.currentTime=time;updatePlayhead(time);},
       exportSVG() {
         if(!geometry) render(state);
@@ -447,5 +455,5 @@
       }
     };
   }
-  global.TempoCharts={createTempoChart:(svg,callbacks)=>create(svg,callbacks,false),createWaveform:(svg,callbacks)=>create(svg,callbacks,true)};
+  global.TempoCharts={tempoScale,createTempoChart:(svg,callbacks)=>create(svg,callbacks,false),createWaveform:(svg,callbacks)=>create(svg,callbacks,true)};
 })(globalThis);

@@ -25,6 +25,8 @@ Committare anche i file aggiornati dal comando. L’hosting serve direttamente l
 - `assets/beat-detection.js`: attacchi spettrali, periodicità locale e tracciamento dei beat.
 - `assets/detection-client.js`: decodifica, cache PCM, Worker e annullamento.
 - `assets/charts.js`, `click-track.js`: grafici SVG e click di verifica.
+- `assets/report-export.js`: riepilogo SVG; `export-client.js` gestisce PNG, decodifica stereo e annullamento.
+- `assets/audio-export.js`: rendering WAV a blocchi in Worker. Il mix conserva velocità e intonazione originali; solo i click possono cambiare velocità.
 
 ## Vincoli
 
