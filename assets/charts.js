@@ -64,7 +64,7 @@
     const serial = ++chartSerial;
     let selectedIds=new Set();
     const selectedBeat=id=>selectedIds.has(String(id));
-    let state = {}, geometry = null, points = [], anchors = [], visibleBeats = [], intervalsByBeat = new Map(), beatsById = new Map(), drag = null, panDrag = null, disposed = false;
+    let state = {}, geometry = null, points = [], anchors = [], visibleBeats = [], barHoverRegions = [], intervalsByBeat = new Map(), beatsById = new Map(), drag = null, panDrag = null, disposed = false;
     let playhead = null, playheadDot = null, tooltip = null, tooltipText = null, tooltipBox = null, dragGhost = null;
     let resizeFrame = null, lastWidth = 0;
     const titleId = `tempo-chart-title-${serial}`, descriptionId = `tempo-chart-desc-${serial}`;
@@ -92,7 +92,7 @@
       if (!tooltip || !geometry) return;
       const width = clamp(Math.max(text.length, (detail || '').length) * 6.6 + 20,90,geometry.width - 12);
       const left = clamp(x - width / 2,6,geometry.width - width - 6);
-      const maxCharacters = Math.max(10, Math.floor((width - 20) / 6.6));
+      const maxCharacters = Math.max(10, Math.floor((width - 20) / 6.6+1e-6));
       const lines=[text.length > maxCharacters ? text.slice(0, maxCharacters - 1) + '…' : text];
       if (detail) {
         let line='';
@@ -131,7 +131,9 @@
       lastWidth = Math.round(rect.width);
       const height = waveform ? Math.max(56, Math.round(rect.height || 112)) : (width < 560 ? 350 : 420);
       if(!waveform)svg.style.height=height+'px';
-      const left = waveform ? 14 : 49, right = 18, top = waveform ? 9 : 34, bottom = waveform ? 23 : 90;
+      const hasBars=!waveform&&Array.isArray(state.timeline?.bars)&&state.timeline.bars.length>0;
+      const barOffset=hasBars?26:0;
+      const left = waveform ? 14 : 49, right = 18, top = waveform ? 9 : 34+barOffset, bottom = waveform ? 23 : 90;
       const start = Math.max(0, Number(state.viewStart) || 0);
       const end = Math.max(start + .05, Number(state.viewEnd) || Number(state.duration) || 30);
       const plotWidth = width-left-right, plotHeight = height-top-bottom;
@@ -143,7 +145,8 @@
       anchors=waveform?[]:rawPoints.filter(p=>p.breakBefore&&p.start>=start&&p.start<=end).map(p=>({beat:beatsByTime.get(p.start),next:p,time:p.start})).filter(a=>a.beat&&!intervalsByBeat.has(String(a.beat.id)));
       const scale=tempoScale([...new Set([...inView,...anchors.map(a=>a.next)])],state.yRange),min=scale.min,max=scale.max,yStep=scale.step;
       const y = value => top + (max-value)/(max-min)*plotHeight;
-      geometry = {width,height,left,right,top,bottom,start,end,plotWidth,plotHeight,x,y,min,max,laneY:height-50};
+      geometry = {width,height,left,right,top,bottom,start,end,plotWidth,plotHeight,x,y,min,max,laneY:height-50,hasBars};
+      barHoverRegions=[];
       if(!waveform&&callbacks.onScale)callbacks.onScale(scale);
       svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio','xMidYMid meet');
@@ -166,8 +169,8 @@
           if (Number(section.start)>start) svg.append(node('line',{x1:x(a),x2:x(a),y1:top-5,y2:height-bottom,stroke:palette.muted,'stroke-opacity':.25,'stroke-dasharray':'3 5'}));
           if (sectionWidth>52) {
             const number = String(index+1);
-            svg.append(node('rect',{x:x(a)+7,y:8,width:number.length>1 ? 24:20,height:18,rx:6,fill:palette.grid}));
-            svg.append(label(x(a)+7+(number.length>1 ? 12:10),21,number,{'text-anchor':'middle',fill:palette.text,'font-size':10}));
+            svg.append(node('rect',{x:x(a)+7,y:8+barOffset,width:number.length>1 ? 24:20,height:18,rx:6,fill:palette.grid}));
+            svg.append(label(x(a)+7+(number.length>1 ? 12:10),21+barOffset,number,{'text-anchor':'middle',fill:palette.text,'font-size':10}));
           }
         });
         for (let tick=0;tick<=6;tick++) {
@@ -175,7 +178,7 @@
           svg.append(node('line',{x1:left,x2:width-right,y1:y(value),y2:y(value),stroke:palette.grid,'stroke-width':1}));
           svg.append(label(left-10,y(value)+4,String(Math.round(value*10)/10),{'text-anchor':'end'}));
         }
-        svg.append(label(left-10,18,'BPM',{'text-anchor':'end','font-size':10}));
+        svg.append(label(left-10,18+barOffset,'BPM',{'text-anchor':'end','font-size':10}));
       }
       const xStep=timeStep(end-start,Math.floor(plotWidth/95));
       let lastLabelX=-Infinity;
@@ -188,8 +191,9 @@
           svg.append(label(pos,height-9,text,{'text-anchor':'middle','font-size':10})); lastLabelX=pos;
         }
       }
+      if(hasBars)drawBars();
       const plot=node('g',{'clip-path':`url(#tempo-clip-${serial})`}); svg.append(plot);
-      visibleBeats=(state.beats || []).filter(beat => finite(beat.time) && Number(beat.time)>=start && Number(beat.time)<=end);
+      visibleBeats=(state.beats || []).filter(beat => !beat.tempoAnchor && finite(beat.time) && Number(beat.time)>=start && Number(beat.time)<=end);
       points=inView;
       if (waveform) drawWaveform(plot);
       else {drawTempo(plot,rawPoints);drawBeatLane();}
@@ -202,6 +206,36 @@
       tooltipBox=node('rect',{height:29,rx:7,fill:'#1b2a36',stroke:'#3a5061','stroke-width':1});
       tooltipText=label(10,19,'',{fill:palette.text,'font-size':11}); tooltip.append(tooltipBox,tooltipText); svg.append(tooltip);
       updatePlayhead(state.currentTime || 0);
+    }
+    function barDescription(bar){
+      return t(bar.pickup?'Levare · battuta {0} · {1}/{2}':'Battuta {0} · {1}/{2}',bar.number,bar.numerator,bar.denominator);
+    }
+    function drawBars(){
+      const g=geometry,strip=node('g',{'data-bar-strip':'true'}),boundaries=node('g',{'data-bar-boundaries':'true','pointer-events':'none'});
+      strip.append(node('rect',{x:g.left,y:5,width:g.plotWidth,height:23,rx:4,fill:'#192735'}));
+      strip.append(label(g.left-8,21,'Batt.',{'text-anchor':'end','font-size':10}));
+      let lastLine=-Infinity,lastLabelRight=-Infinity;
+      for(const bar of state.timeline.bars){
+        // Null timestamps mark boundaries inside an unmeasured gap. Never
+        // interpolate a barline through such a gap just to fill the display.
+        if(!finite(bar.start)||Number(bar.start)>g.end)continue;
+        const start=Number(bar.start),hasEnd=finite(bar.end),end=hasEnd?Number(bar.end):start;
+        if(end<g.start)continue;
+        const px=g.x(start),a=Math.max(g.left,px),b=Math.min(g.width-g.right,g.x(end));
+        if(hasEnd&&b>a)barHoverRegions.push({left:a,right:b,bar});
+        if(start>=g.start&&px-lastLine>=22){
+          const line=node('line',{x1:px,x2:px,y1:g.top,y2:g.height-g.bottom,stroke:palette.teal,'stroke-opacity':.19,'stroke-width':1,'data-bar-boundary':bar.number});
+          boundaries.append(line);lastLine=px;
+        }
+        if(!hasEnd||b<=a)continue;
+        const text=bar.pickup?t('Levare')+' '+bar.number:String(bar.number),width=text.length*6.1+9;
+        let labelX=a+5;
+        if(labelX<lastLabelRight+12){if(lastLabelRight+12+width<=b-3)labelX=lastLabelRight+12;else continue;}
+        if(labelX+width>g.width-g.right-3)continue;
+        const marker=label(labelX,21,text,{'font-size':10,fill:bar.pickup?palette.teal:palette.text,'data-bar-label':bar.number});
+        marker.append(node('title',null,barDescription(bar)));strip.append(marker);lastLabelRight=labelX+Math.max(35,width);
+      }
+      svg.append(boundaries,strip);
     }
     function drawTempo(plot,allPoints) {
       const g=geometry;
@@ -325,7 +359,7 @@
       lane.append(node('rect',{x:g.left,y:g.laneY-20,width:g.plotWidth,height:44,rx:6,fill:'#192735'}));
       lane.append(label(g.left-8,g.laneY+4,'Beat',{'text-anchor':'end','font-size':10}));
       const marks={normal:[],review:[]},seen=new Set(),selectedPixels=new Set();
-      const all=state.beats||[],first=all.findIndex(b=>b===visibleBeats[0]);
+      const all=(state.beats||[]).filter(beat=>!beat.tempoAnchor),first=all.findIndex(b=>b===visibleBeats[0]);
       for(let i=0;i<visibleBeats.length;i++){
         const beat=visibleBeats[i],px=g.x(beat.time),selected=selectedBeat(beat.id),pixel=Math.round(px);
         if(seen.has(pixel)&&!selected)continue;seen.add(pixel);
@@ -437,15 +471,21 @@
         svg.style.cursor='ew-resize';
       } else {
         if(waveform){const time=clamp(geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start),0,Number(state.duration));svg.style.cursor='pointer';showTooltip(point.x,geometry.top,timeLabel(time,true));return;}
+        if(geometry.hasBars&&point.y>=5&&point.y<=28){
+          const region=barHoverRegions.find(item=>point.x>=item.left&&point.x<item.right);
+          svg.style.cursor='default';
+          if(region)showTooltip(point.x,23,barDescription(region.bar));else hideTooltip();
+          return;
+        }
         const found=hit(point);
         svg.style.cursor=found?(selectedIds.size<=1&&String(found.id)===String(state.selectedId)?'ew-resize':'pointer'):'grab';
         if(found) {
           const interval=found.interval || (waveform ? intervalsByBeat.get(String(found.id)) : null);
+          const beat=found.beat || beatsById.get(String(found.id));
           const expression=interval && expressionNames[interval.expressive] || (found.beat && found.beat.fermataBefore ? 'Fermata' : '');
           const suspicious=interval && interval.anomaly && !isHold(interval) ? interval.anomaly : '';
-          const annotation=[t(suspicious),t(expression),found.anchor ? t('Ripresa') : ''].filter(Boolean).join(' · ');
+          const annotation=[beat?.tempoAnchor?t('Cambio di tempo'):'',t(suspicious),t(expression),found.anchor ? t('Ripresa') : ''].filter(Boolean).join(' · ');
           const text=`${timeLabel(found.time,true)}${annotation ? ' · '+annotation : ''}${found.interval ? ' · '+Number(found.interval.bpm).toFixed(1)+' BPM' : ''}`;
-          const beat=found.beat || beatsById.get(String(found.id));
           const automatic=isAutomatic(beat) ? (isLowAutomatic(beat) ? t('Automatico · da rivedere') : t('Automatico')) : '';
           showTooltip(geometry.x(found.time),found.y,text,[found.anchor?t('BPM dal beat successivo: {0}',Number(found.anchor.next.bpm).toFixed(1)):automatic,String(found.id)===String(state.selectedId)?t('Trascina per correggere'):t('Clic per selezionare')].filter(Boolean).join(' · '));
         } else hideTooltip();

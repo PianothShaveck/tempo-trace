@@ -7,14 +7,14 @@
   'use strict';
   function renderWav(options,progress=()=>{}){
     const sr=options.sampleRate||44100,rate=options.mode==='mix'?1:(options.rate||1),duration=Number(options.duration);
-    if(!Number.isFinite(duration)||duration<=0||duration>7200||!Number.isFinite(rate)||rate<.25||rate>2||![11025,22050,44100,48000].includes(sr))throw new Error('Durata o frequenza audio non valida.');
+    if(!Number.isFinite(duration)||duration<=0||!Number.isFinite(rate)||rate<.25||rate>2||![11025,22050,44100,48000].includes(sr))throw new Error('Durata o frequenza audio non valida.');
     const mix=options.mode==='mix',channels=mix?options.channels:[],n=mix?channels?.length:1;
     if(!n||n>2||mix&&!channels.every(c=>c instanceof Float32Array))throw new Error('Audio originale non disponibile.');
     const clickVolume=Math.max(0,Math.min(2,Number.isFinite(options.clickVolume)?options.clickVolume:1));
     const musicVolume=Math.max(0,Math.min(1,Number.isFinite(options.musicVolume)?options.musicVolume:.8));
     const beats=(options.beats||[]).filter(b=>Number.isFinite(b.time)&&b.time>=0&&b.time<=duration).map(b=>({frame:Math.round(b.time/rate*sr),time:b.time})).sort((a,b)=>a.frame-b.frame);
     const frames=Math.ceil(Math.max(duration/rate,beats.length?beats.at(-1).time/rate+.035:0)*sr),bytes=frames*n*2;
-    if(bytes>256*1024*1024)throw new Error('WAV troppo grande. Esporta un tratto più breve.');
+    if(!Number.isSafeInteger(bytes)||bytes>0xffffffff-36)throw new Error('Il formato WAV supporta al massimo 4 GB. Esporta un tratto più breve.');
     const clickLength=Math.round(.035*sr),duckLead=Math.round(.008*sr),duckTail=Math.round(.20*sr),blockSize=32768;
     for(const beat of beats){
       beat.duck=1;

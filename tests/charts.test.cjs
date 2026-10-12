@@ -79,3 +79,52 @@ test('modifier clicks forward selection intent and do not trigger drag or dense 
  svg.dispatch('pointerdown',{button:0,pointerId:1,clientX:x,clientY:370,shiftKey:true,metaKey:true});svg.dispatch('pointerup',{pointerId:1,clientX:x,clientY:370});
  assert.deepEqual(calls,[{id:'10',extend:true,toggle:true}]);
 });
+
+test('advanced chart adds a separate bar strip with pickup, custom numbers and meter tooltips',()=>{
+ const Musical=require('../assets/musical.js'),h=harness();
+ h.state.timeline=Musical.build(h.state.beats,{enabled:true,firstBar:12,pickup:1,meters:[{bar:12,numerator:3,denominator:1}]},1);h.chart.render(h.state);
+ const strip=h.svg.querySelector('g[data-bar-strip="true"]');assert.ok(strip);
+ assert.ok(strip.querySelector('text[data-bar-label="11"]'));assert.ok(strip.querySelector('text[data-bar-label="12"]'));
+ assert.match(strip.querySelector('text[data-bar-label="11"]').textContent,/11/);
+ assert.match(strip.querySelector('text[data-bar-label="12"]').querySelector('title').textContent,/12.*3\/1/);
+ assert.ok(h.svg.querySelector('line[data-bar-boundary="12"]'));
+ const bpm=h.svg.querySelectorAll('text').find(node=>node.textContent==='BPM');assert.equal(bpm.getAttribute('y'),'44','BPM and section labels have their own lower strip');
+ h.event('pointermove',250,18);const visible=h.svg.querySelector('g[aria-hidden="true"]');assert.equal(visible.getAttribute('visibility'),'visible');assert.match(visible.querySelectorAll('tspan').map(item=>item.textContent).join(' '),/12.*3\/1/);
+ h.event('pointerdown',300,105);h.event('pointerup',300,105);assert.equal(h.calls[0][0],'seek','advanced grid retains ordinary background seeking');
+});
+
+test('bar labels and boundaries are thinned at wide zoom and restored when zooming in',()=>{
+ const Musical=require('../assets/musical.js'),h=harness();
+ h.state.beats=Array.from({length:1001},(_,i)=>({id:String(i),time:i*.5}));h.state.duration=500;h.state.viewEnd=500;
+ h.state.analysis=Analysis.analyze(h.state.beats);h.state.timeline=Musical.build(h.state.beats,{enabled:true,firstBar:100,meters:[{bar:100,numerator:4,denominator:4}]});h.chart.render(h.state);
+ const wideLabels=h.svg.querySelectorAll('text[data-bar-label]'),wideLines=h.svg.querySelectorAll('line[data-bar-boundary]');
+ assert.ok(wideLabels.length>=5&&wideLabels.length<=20);assert.ok(wideLines.length<=34);
+ for(let i=1;i<wideLabels.length;i++)assert.ok(Number(wideLabels[i].getAttribute('x'))-Number(wideLabels[i-1].getAttribute('x'))>=40);
+ h.state.viewStart=20;h.state.viewEnd=30;h.chart.render(h.state);
+ assert.equal(h.svg.querySelectorAll('text[data-bar-label]').length,5);
+ assert.ok(h.svg.querySelector('text[data-bar-label="110"]'));assert.ok(h.svg.querySelector('text[data-bar-label="114"]'));
+});
+
+test('advanced barlines do not invent positions across gaps and simple mode remains unchanged',()=>{
+ const Musical=require('../assets/musical.js'),h=harness();
+ assert.ok(!h.svg.querySelector('g[data-bar-strip]'));
+ const simple=h.svg.querySelectorAll('text').find(node=>node.textContent==='BPM');assert.equal(simple.getAttribute('y'),'18');
+ h.state.beats=[0,.5,1,10,10.5,11].map((time,i)=>({id:String(i),time,breakBefore:i===3}));h.state.duration=11;h.state.viewEnd=11;
+ h.state.analysis=Analysis.analyze(h.state.beats);h.state.timeline=Musical.build(h.state.beats,{enabled:true,firstBar:1,meters:[{bar:1,numerator:1,denominator:8}]});h.chart.render(h.state);
+ assert.equal(h.state.timeline.bars.find(bar=>bar.number===6).start,null);
+ assert.ok(!h.svg.querySelector('line[data-bar-boundary="6"]'));assert.ok(!h.svg.querySelector('text[data-bar-label="6"]'));
+ assert.ok(h.svg.querySelector('rect[data-anchor-beat="3"]'),'resume markers survive the extra bar strip');
+ const wave=harness(true);wave.state.timeline=h.state.timeline;wave.chart.render(wave.state);assert.ok(!wave.svg.querySelector('g[data-bar-strip]'));
+});
+
+test('tempo-only MIDI anchors stay editable on the curve but never appear in the audible beat lane',()=>{
+ const h=harness();h.state.beats[10].tempoAnchor=true;h.chart.render(h.state);
+ const lane=h.svg.querySelector('g[data-beat-lane="true"]'),marks=lane.querySelectorAll('path').map(path=>path.getAttribute('d')).join('');
+ assert.equal((marks.match(/M/g)||[]).length,20);
+ const x=49+5/10*733;h.event('pointerdown',x,370);h.event('pointerup',x,370);
+ assert.deepEqual(h.calls,[['seek',5]],'tempo-only anchor is not a beat-lane editing target');h.calls.length=0;
+ const scale=h.chart.getScale(),y=34+(scale.max-120)/(scale.max-scale.min)*(420-34-90);
+ h.event('pointermove',x,y);const tooltip=h.svg.querySelector('g[aria-hidden="true"]');
+ assert.match(tooltip.querySelectorAll('tspan').map(item=>item.textContent).join(' '),/Tempo change/);
+ h.event('pointerdown',x,y);h.event('pointerup',x,y);assert.deepEqual(h.calls,[['select','10']]);
+});

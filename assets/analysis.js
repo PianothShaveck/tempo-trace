@@ -3,14 +3,14 @@
  * TempoAnalysis.analyze(beats, options, sectionBoundaries = null) (also CommonJS).
  * sectionBoundaries: optional manual starting times, snapped to existing beats.
  * null keeps automatic segmentation; [] merges all measured coverage.
- * beats: [{id, time, breakBefore?, fermataBefore?}]; invalid/negative times are ignored,
+ * beats: [{id, time, quarter?, breakBefore?, fermataBefore?}]; invalid/negative times are ignored,
  * duplicate times are merged, and input is never mutated. A breakBefore on a
  * beat prevents an interval from the preceding beat and starts a new group.
  * options: beatUnit (quarter notes per tap, default 1), sectionThreshold
  * (relative change, .12), minSectionSeconds (8), smoothing (odd median window, 5).
  *
  * Returns {intervals, sections, stats, anomalies, events}. Intervals have {index, start,
- * end, time, bpm, smoothed, anomaly, expressive, beatId, breakBefore}; time is the midpoint,
+ * end, time, quarters, bpm, smoothed, anomaly, expressive, beatId, breakBefore}; time is the midpoint,
  * beatId is the ENDING tap's id, and breakBefore begins a continuous group.
  * Sections have {id, start, end, bpm, count, perceived}; count is the number of intervals.
  * stats: {mean, start, end, min, max, perceived}; empty measured values are null.
@@ -18,7 +18,7 @@
  * measured average or perceptual ground truth. status is ok, variable, or
  * insufficient; only ok has a BPM. support is weighted nearby-beat share, not
  * a calibrated confidence score. mean and section
- * bpm are exact tap-count / original-duration means, INCLUDING flagged taps and
+ * bpm are exact covered-quarter-notes / original-duration means, INCLUDING flagged taps and
  * held intervals. fermataBefore marks the interval ENDING at that tap as held.
  * expressive is null, 'accelerando', 'rallentando', 'fermata', or 'possible-fermata'.
  * Events: {type, label, start, end, beatId?, confidence:'manual'|'candidate'|'detected'}.
@@ -50,6 +50,8 @@
     typeof value === 'number' && Number.isFinite(value) ? clamp(value, min, max) : fallback;
   const isHold = interval => interval.expressive === 'fermata' || interval.expressive === 'possible-fermata';
   const isRamp = interval => interval.expressive === 'accelerando' || interval.expressive === 'rallentando';
+  const coveredQuarters = (interval, unit = 1) => Number.isFinite(interval.quarters) && interval.quarters > 0 ? interval.quarters : unit;
+  const pulseDuration = interval => (interval.end - interval.start) / coveredQuarters(interval);
 
   function normalizeBeats(input) {
     if (!Array.isArray(input)) return [];
@@ -57,6 +59,7 @@
       Number.isFinite(b.time) && b.time >= 0).map((b, index) => ({
       id: b.id == null ? 'beat-' + index : b.id,
       time: b.time,
+      ...(typeof b.quarter === 'number' && Number.isFinite(b.quarter) ? {quarter:b.quarter} : {}),
       breakBefore: b.breakBefore === true,
       fermataBefore: b.fermataBefore === true,
       ...(['fermata','accelerando','rallentando','none'].includes(b.expressionBefore)?{expressionBefore:b.expressionBefore}:{})
@@ -67,6 +70,7 @@
       if (previous && previous.time === beat.time) {
         previous.breakBefore = previous.breakBefore || beat.breakBefore;
         previous.fermataBefore = previous.fermataBefore || beat.fermataBefore;
+        if(previous.quarter == null && beat.quarter != null) previous.quarter = beat.quarter;
         if(beat.expressionBefore!=null)previous.expressionBefore=beat.expressionBefore;
       } else result.push(beat);
     }
@@ -76,7 +80,7 @@
   function neighboringDurations(group, from, to) {
     const values = [];
     for (let j = Math.max(0, from - 4); j < Math.min(group.length, to + 5); j++) {
-      if ((j < from || j > to) && !isHold(group[j])) values.push(group[j].end - group[j].start);
+      if ((j < from || j > to) && !isHold(group[j])) values.push(pulseDuration(group[j]));
     }
     return values;
   }
@@ -84,7 +88,7 @@
   // Both sides must return to the same pulse. This avoids declaring the first
   // beat of a real tempo change an outlier. At an edge, require three neighbors.
   function returnsToPulse(group, from, to, baseline) {
-    const close = i => Math.abs(Math.log((group[i].end - group[i].start) / baseline)) < .25;
+    const close = i => Math.abs(Math.log(pulseDuration(group[i]) / baseline)) < .25;
     const hasLeft = from > 0;
     const hasRight = to + 1 < group.length;
     if (hasLeft && hasRight) return close(from - 1) && close(to + 1);
@@ -100,8 +104,8 @@
       const neighbors = neighboringDurations(group, i, i + 1);
       if (neighbors.length < 3) continue;
       const base = median(neighbors);
-      const a = group[i].end - group[i].start;
-      const b = group[i + 1].end - group[i + 1].start;
+      const a = pulseDuration(group[i]);
+      const b = pulseDuration(group[i + 1]);
       if (Math.min(a, b) < .8 * base && Math.max(a, b) < .98 * base &&
           Math.abs((a + b) / base - 1) <= .16 && returnsToPulse(group, i, i + 1, base)) {
         group[i].anomaly = 'Tap in più?';
@@ -116,7 +120,7 @@
       const base = median(neighbors);
       const logBase = Math.log(base);
       const spread = median(neighbors.map(n => Math.abs(Math.log(n) - logBase)));
-      const ratio = (group[i].end - group[i].start) / base;
+      const ratio = pulseDuration(group[i]) / base;
       if (Math.abs(Math.log(ratio)) <= Math.max(Math.log(1.4), 4 * spread) ||
           !returnsToPulse(group, i, i, base)) continue;
       // A long pulse is acoustically ambiguous: fermata, expressive hold, or
@@ -282,10 +286,10 @@
       if (best !== -1) {
         stack.push([best, to], [from, best]);
       } else {
-        let duration = 0;
-        for (let i = from; i < to; i++) duration += group[i].end - group[i].start;
+        let duration = 0, quarters = 0;
+        for (let i = from; i < to; i++) { duration += group[i].end - group[i].start; quarters += coveredQuarters(group[i], unit); }
         output.push({start: group[from].start, end: group[to - 1].end,
-          bpm: (to - from) * 60 * unit / duration, count: to - from});
+          bpm: quarters * 60 / duration, count: to - from, quarters});
       }
     }
     return output;
@@ -320,8 +324,8 @@
         const change=left&&right?Math.abs(left.center-right.center):0;
         const distinct=a.duration+1e-9>=config.minSectionSeconds&&b.duration+1e-9>=config.minSectionSeconds&&left&&right&&change>=Math.log1p(config.sectionThreshold)&&change>2.2*(left.deviation+right.deviation);
         if(!distinct){
-          const duration=previous.count*60*unit/previous.bpm+section.count*60*unit/section.bpm;
-          previous.end=section.end;previous.count+=section.count;previous.bpm=previous.count*60*unit/duration;continue;
+          const duration=previous.quarters*60/previous.bpm+section.quarters*60/section.bpm;
+          previous.end=section.end;previous.count+=section.count;previous.quarters+=section.quarters;previous.bpm=previous.quarters*60/duration;continue;
         }
       }
       output.push({...section});
@@ -344,21 +348,22 @@
     }
     const indices=[...cuts].sort((a,b)=>a-b),result=[];
     for(let n=1;n<indices.length;n++){
-      const from=indices[n-1],to=indices[n];let duration=0;
-      for(let i=from;i<to;i++)duration+=intervals[i].end-intervals[i].start;
-      result.push({start:intervals[from].start,end:intervals[to-1].end,count:to-from,bpm:(to-from)*60*unit/duration,id:'section-'+n});
+      const from=indices[n-1],to=indices[n];let duration=0,quarters=0;
+      for(let i=from;i<to;i++){duration+=intervals[i].end-intervals[i].start;quarters+=coveredQuarters(intervals[i],unit);}
+      result.push({start:intervals[from].start,end:intervals[to-1].end,count:to-from,quarters,bpm:quarters*60/duration,id:'section-'+n});
     }
     return result;
   }
 
   // This is a typical recurring pulse, not a psychoacoustic measurement. Use
-  // equal beat weight (not duration weight) so a slow interval cannot dominate
-  // merely by lasting longer. The measured count/time mean stays independent.
+  // musical beat weight (not duration weight) so a slow interval cannot dominate
+  // merely by lasting longer, and inserted MIDI tempo anchors cannot inflate a
+  // short passage. The measured quarter-note/time mean stays independent.
   // Log ratios make every threshold invariant under a change of beat unit.
-  function perceivedTempo(intervals) {
+  function perceivedTempo(intervals, unit = 1) {
     const empty = status => ({bpm: null, status, support: 0});
     const samples = [];
-    let ordinary = 0, directionChanges = 0, previousDirection = null;
+    let ordinary = 0, reliable = 0, directionChanges = 0, previousDirection = null;
     let previousValue = null, netChange = 0, variation = 0, moving = 0, pairs = 0;
     for (const p of intervals) {
       if (p.anomaly || isHold(p)) { previousValue = null; continue; }
@@ -369,15 +374,16 @@
         if (Math.abs(step) > .00015) moving++;
       }
       previousValue = value;
-      const ramp = isRamp(p);
-      if (!ramp) ordinary++;
+      const ramp = isRamp(p), musicalWeight = coveredQuarters(p, unit) / unit;
+      reliable += musicalWeight;
+      if (!ramp) ordinary += musicalWeight;
       else {
         if (previousDirection && previousDirection !== p.expressive) directionChanges++;
         previousDirection = p.expressive;
       }
-      samples.push({value, weight: ramp ? .15 : 1});
+      samples.push({value, weight: musicalWeight * (ramp ? .15 : 1)});
     }
-    if (samples.length < 8) return empty('insufficient');
+    if (samples.length < 8 || reliable < 8 - 1e-9) return empty('insufficient');
     // Even a modest continuous drift can fall below expressive-event detection.
     // Require movement throughout most of the passage, not a final ritardando
     // following an established pulse. Gaps never count as directional steps.
@@ -405,7 +411,7 @@
     // Repeated narrow back-and-forth rubato has a recurring center, even when
     // its expressive spans cover most beats. A one-way ramp has no base.
     const recurringRubato = directionChanges >= 2 && spread <= Math.log(1.3);
-    if (ordinary < Math.max(8, samples.length * .25) && !recurringRubato) return empty('variable');
+    if (ordinary < Math.max(8, reliable * .25) && !recurringRubato) return empty('variable');
     for (let right = 0; right < samples.length; right++) {
       mass += samples[right].weight;
       while (samples[right].value - samples[left].value > width) mass -= samples[left++].weight;
@@ -436,14 +442,14 @@
       for (let j = i - 7; j <= i; j++) stable[j] = 1;
     }
     const plateaus = intervals.filter((p, i) => stable[i]).map(p =>
-      ({value: Math.log(p.bpm), duration: p.end - p.start})).sort((a, b) => a.value - b.value);
+      ({value: Math.log(p.bpm), duration: p.end - p.start, weight: coveredQuarters(p, unit) / unit})).sort((a, b) => a.value - b.value);
     const centers = [];
     let from = 0;
     for (let to = 1; to <= plateaus.length; to++) {
       if (to < plateaus.length && plateaus[to].value - plateaus[to - 1].value <= Math.log(1.05)) continue;
       const cluster = plateaus.slice(from, to);
-      if (cluster.length >= 8 && cluster.reduce((sum, p) => sum + p.duration, 0) >= 4 - 1e-9)
-        centers.push(median(cluster.map(p => p.value)));
+      if (cluster.reduce((sum, p) => sum + p.weight, 0) >= 8 - 1e-9 && cluster.reduce((sum, p) => sum + p.duration, 0) >= 4 - 1e-9)
+        centers.push(quantile(cluster, .5));
       from = to;
     }
     if (centers.length > 1 && centers.at(-1) - centers[0] > Math.log(1.08)) return variable();
@@ -465,7 +471,7 @@
   function analyze(input, settings, sectionBoundaries=null) {
     const options = settings && typeof settings === 'object' ? settings : {};
     const unit = typeof options.beatUnit === 'number' && Number.isFinite(options.beatUnit) &&
-      options.beatUnit > 0 && options.beatUnit <= 16 ? options.beatUnit : 1;
+      options.beatUnit > 0 ? options.beatUnit : 1;
     const config = {
       sectionThreshold: finiteOption(options.sectionThreshold, .12, .02, 1),
       minSectionSeconds: finiteOption(options.minSectionSeconds, 8, 2, 120),
@@ -484,10 +490,12 @@
       }
       const start = beats[i - 1].time;
       const end = beats[i].time;
-      const bpm = 60 * unit / (end - start);
+      const difference = beats[i].quarter - beats[i - 1].quarter;
+      const quarters = Number.isFinite(difference) && difference > 0 ? difference : unit;
+      const bpm = 60 * quarters / (end - start);
       if (!(end > start) || !Number.isFinite(bpm) || bpm <= 0) continue;
       const interval = {index: intervals.length, start, end, time: start + (end - start) / 2,
-        bpm, smoothed: bpm, anomaly: null, manualExpression:beats[i].expressionBefore, expressive: beats[i].expressionBefore==='fermata'||beats[i].fermataBefore ? 'fermata' : null,
+        quarters, bpm, smoothed: bpm, anomaly: null, manualExpression:beats[i].expressionBefore, expressive: beats[i].expressionBefore==='fermata'||beats[i].fermataBefore ? 'fermata' : null,
         beatId: beats[i].id, breakBefore: current.length === 0};
       intervals.push(interval);
       current.push(interval);
@@ -530,20 +538,21 @@
       section.id='section-'+(i+1);
       let sectionTo=sectionFrom;
       while(sectionTo<intervals.length&&intervals[sectionTo].end<=section.end+1e-9)sectionTo++;
-      section.perceived=perceivedTempo(intervals.slice(sectionFrom,sectionTo));
+      section.perceived=perceivedTempo(intervals.slice(sectionFrom,sectionTo),unit);
       sectionFrom=sectionTo;
     });
-    let duration = 0;
+    let duration = 0, quarters = 0;
     let min = Infinity;
     let max = -Infinity;
     for (const interval of intervals) {
       duration += interval.end - interval.start;
+      quarters += interval.quarters;
       min = Math.min(min, interval.bpm);
       max = Math.max(max, interval.bpm);
     }
     return {intervals, sections, stats: {
-      mean: intervals.length * 60 * unit / duration,
-      start: edgeTempo(groups[0], true), end: edgeTempo(groups[groups.length - 1], false), min, max, perceived: perceivedTempo(intervals)
+      mean: quarters * 60 / duration,
+      start: edgeTempo(groups[0], true), end: edgeTempo(groups[groups.length - 1], false), min, max, perceived: perceivedTempo(intervals,unit)
     }, anomalies: intervals.filter(interval => interval.anomaly), events: events.sort((a, b) => a.start - b.start)};
   }
 

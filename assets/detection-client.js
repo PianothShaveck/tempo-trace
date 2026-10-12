@@ -5,7 +5,6 @@
   const aborted=()=>new DOMException('Operazione annullata','AbortError');
   async function decode(file,duration) {
     if(!file)throw new Error('Collega il file audio o video.');
-    if(file.size>128*1024*1024 || duration>1800)throw new Error('Rilevamento disponibile fino a 30 minuti e 128 MB.');
     if(file===cachedFile && cachedPromise)return cachedPromise;
     const AudioCtx=window.AudioContext || window.webkitAudioContext;
     if(!AudioCtx)throw new Error('Decodifica audio non disponibile in questo browser.');

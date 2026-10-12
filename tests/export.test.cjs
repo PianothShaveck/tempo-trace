@@ -40,7 +40,7 @@ test('automatic balancing attenuates loud music only around beats; normalization
 });
 test('oversized and unavailable audio exports fail before rendering',()=>{
  assert.throws(()=>Audio.renderWav({mode:'mix',duration:2}),/originale/);
- assert.throws(()=>Audio.renderWav({mode:'clicks',duration:7200,rate:.25}),/troppo grande/);
+ assert.throws(()=>Audio.renderWav({mode:'clicks',duration:20000,rate:.25}),/4 GB/);
 });
 test('serialized export worker runs without imports and transfers valid WAV',()=>{
  const messages=[],context=vm.createContext({Float32Array,ArrayBuffer,DataView,self:{postMessage:(data,transfer)=>messages.push({data,transfer})}});
@@ -71,7 +71,8 @@ function clientHarness({deferDecode=false,imageFails=false}={}){
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 test('audio client crops full-quality stereo and aligns only beats inside the chosen excerpt',async()=>{
  const h=clientHarness(),file={size:100,arrayBuffer:async()=>new ArrayBuffer(10)};
- const promise=h.client.audio(file,{mode:'mix',duration:4,start:1,end:2,beats:[{time:.5},{time:1},{time:1.6},{time:2.2}]});await tick();
+ file.size=129*1024*1024;
+ const promise=h.client.audio(file,{mode:'mix',duration:1801,start:1,end:2,beats:[{time:.5},{time:1},{time:1.6},{time:2.2}]});await tick();
  const worker=h.workers[0];assert.equal(worker.data.sampleRate,44100);assert.equal(worker.data.duration,1);assert.equal(worker.data.channels.length,2);
  assert.equal(worker.data.channels[0].length,44100);assert.equal(worker.data.channels[0][0],.25);assert.equal(worker.data.channels[1][0],-.5);
  assert.deepEqual(Array.from(worker.data.beats,b=>Math.round(b.time*10)/10),[0,.6]);assert.equal(worker.transfer.length,2);

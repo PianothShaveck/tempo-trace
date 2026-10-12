@@ -6,6 +6,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const {createDOM, Element} = require('./dom-stub.cjs');
 const TempoAnalysis = require('../assets/analysis.js');
+const TempoMusical = require('../assets/musical.js');
+const TempoMidi = require('../assets/midi.js');
 
 const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, '../assets/app.js'), 'utf8');
@@ -20,7 +22,7 @@ function boot(storageEntries = [], overrides = {}) {
   let nextId = 0, taskId = 0;
   const charts = [];
   const createChart = (svg, callbacks) => {const chart = {render(data) {this.latest = data;callbacks?.onScale?.({...this.getScale(),clipped:0});}, getScale(){return this.latest?.yRange||{min:80,max:120};}, setPlayhead(time) {this.time = time;}, exportSVG() {return '<svg/>';}}; charts.push(chart); return chart;};
-  const context = vm.createContext({document, window, TempoAnalysis,
+  const context = vm.createContext({document, window, TempoAnalysis, TempoMusical, TempoMidi, File,
     TempoCharts: {createTempoChart: createChart, createWaveform: createChart,tempoScale:()=>({min:80,max:160})},
     crypto: {randomUUID: () => 'generated-' + ++nextId},
     localStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value)},
@@ -30,6 +32,8 @@ function boot(storageEntries = [], overrides = {}) {
   // Expose only in this VM copy. Production app remains a closed IIFE.
   const hook = `globalThis.app = {validateProject, adoptProject, loadProject, loadFile, tap, moveBeat, removeSelected,
     selectBeat, undo, redo, seekTo, persist, payload, snapshot, openDetection, runDetection, applyDetection, cancelDetection, exportGraphic, exportAudio, followPlayhead, panChart, animatePlayback, openOffset, applyOffset,
+    openMeter, applyMeter, loadMidiFile, importMidi, chooseMidiTarget, convertMidi, exportMidiMap, openMidiConvert, cancelMidiImport,
+    get musicalTimeline(){return musicalTimeline;}, captureDownloads(callback){download=callback;},
     get view(){return {start:viewStart,end:viewEnd,yRange,follow:followPlayback};},
     attachFile(file = {name:'piano.wav',size:1234}) {currentFile = file;}, setView(start, end) {viewStart=start;viewEnd=end;},
     stubProbe(duration=30) {probeFile=async()=>duration;},
@@ -685,4 +689,191 @@ test('basic tempo follows the custom track start and is recomputed from the expo
  assert.equal(report.project.analysis.stats.perceived.status,'ok');assert.ok(Math.abs(report.project.analysis.stats.perceived.bpm-66)<.1);
  assert.ok(report.project.analysis.sections.every(s=>Math.abs(s.perceived.bpm-66)<.1));
  assert.equal(h.$('statPerceived').textContent,'Variable','exporting an excerpt does not replace the whole-track summary');
+});
+
+
+test('large-file warning does not block detection or audio export',async()=>{
+ const h=detectionHarness();h.open(project([0,1,2,3],{duration:1801}));h.api.attachFile({name:'large.wav',size:129*1024*1024});h.api.openDetection();
+ const pending=h.api.runDetection();assert.equal(h.$('detectMemoryWarning').hidden,false);assert.equal(h.requests.length,1);
+ h.requests[0].resolve(detected([0,.5,1,1.5]));await pending;assert.equal(h.$('detectError').hidden,true);
+ let called=false;const e=boot([],{TempoExportClient:{async audio(){called=true;return new Blob(['wav']);}}});
+ e.open(project([0,1,2],{duration:1801}));e.api.attachFile({name:'large.wav',size:129*1024*1024});e.$('saveMix').click();
+ await e.api.exportAudio();assert.equal(called,true);assert.equal(e.$('audioMemoryWarning').hidden,false);assert.equal(e.$('audioExportError').hidden,true);
+ e.$('saveMix').click();assert.equal(e.$('audioMemoryWarning').hidden,true);
+});
+
+function inputValue(node,value){node.value=String(value);node.dispatch('input');}
+function meterRow(h,index,{bar,numerator,denominator}){
+ const inputs=h.$('meterRows').children[index].querySelectorAll('input');
+ for(const [i,value] of [[0,bar],[1,numerator],[2,denominator]])if(value!==undefined)inputValue(inputs[i],value);
+}
+function advancedConfig(extra={}){return {enabled:true,firstBar:1,pickup:0,meters:[{bar:1,numerator:4,denominator:4}],...extra};}
+function enableAdvanced(h){h.api.openMeter();h.api.applyMeter();assert.equal(h.$('meterError').hidden,true);}
+function midiFixture(name='performance.mid'){
+ const anchors=[{quarter:0,time:0},{quarter:.25,time:.125}];
+ for(let q=1;q<=20;q++)anchors.push({quarter:q,time:.125+(q-.25)});
+ const bytes=TempoMidi.exportTempo({anchors,firstBar:42,pickup:1,meterEvents:[{quarter:0,bar:42,numerator:3,denominator:1},{quarter:13,bar:43,numerator:11,denominator:8}]});
+ const file=new File([bytes],name,{type:'audio/midi'});
+ return {file,bytes,parsed:TempoMidi.parse(bytes)};
+}
+function midiHarness(overrides={}){
+ const calls=[];
+ const h=boot([],{TempoMidiAudio:{async render(parsed,options){calls.push({parsed,options});options.onProgress(.7);return {blob:new Blob(['rendered-wave'],{type:'audio/wav'}),peaks:new Float32Array([0,.5,1])};}},...overrides});
+ return {...h,calls};
+}
+
+test('advanced mode starts hidden and enables arbitrary meters, pickup and custom numbering atomically',()=>{
+ const h=boot();h.open(project(Array.from({length:41},(_,i)=>i*.5)));
+ assert.equal(h.api.state.advanced.enabled,false);assert.equal(h.$('advancedPanel').hidden,true);assert.equal(h.$('barExportOptions').hidden,true);
+ h.$('advancedButton').click();assert.equal(h.$('meterDialog').open,true);assert.equal(h.api.state.advanced.enabled,false);
+ inputValue(h.$('firstBar'),42);inputValue(h.$('pickupLength'),1);meterRow(h,0,{numerator:3,denominator:1});
+ h.$('addMeter').click();meterRow(h,1,{bar:43,numerator:11,denominator:8});h.api.applyMeter();
+ assert.equal(h.$('meterError').hidden,true);assert.equal(h.$('meterDialog').open,false);assert.equal(h.$('advancedPanel').hidden,false);
+ assert.deepEqual(plain(h.api.state.advanced),advancedConfig({firstBar:42,pickup:1,meters:[{bar:42,numerator:3,denominator:1},{bar:43,numerator:11,denominator:8}]}));
+ const bars=h.api.musicalTimeline.bars;
+ assert.deepEqual(plain(bars.slice(0,3).map(b=>[b.number,b.startQuarter,b.endQuarter,b.numerator,b.denominator])),[[41,0,1,3,1],[42,1,13,3,1],[43,13,18.5,11,8]]);
+ assert.equal(h.api.history.undo,1);
+ h.api.undo();assert.equal(h.$('advancedPanel').hidden,true);h.api.redo();assert.equal(h.$('advancedPanel').hidden,false);
+ h.api.persist();const saved=JSON.parse(h.storage.get('tempo-trace.session.v1'));const reopened=boot();reopened.open(saved);
+ assert.deepEqual(plain(reopened.api.state.advanced),plain(h.api.state.advanced));assert.deepEqual(plain(reopened.api.musicalTimeline.bars),plain(bars));
+ h.$('advancedButton').click();assert.equal(h.api.state.advanced.enabled,false);assert.equal(h.$('barExportOptions').hidden,true);
+ h.$('advancedButton').click();assert.equal(h.$('firstBar').value,'42','reenabling keeps meter settings');
+});
+
+test('invalid meter edits and cancellation preserve the complete project and undo history',()=>{
+ const h=boot();h.open(project([0,1,2,3,4]));const before=plain(h.api.snapshot());
+ h.api.openMeter();meterRow(h,0,{numerator:3,denominator:1});inputValue(h.$('pickupLength'),12);h.api.applyMeter();
+ assert.equal(h.$('meterError').hidden,false);assert.deepEqual(plain(h.api.snapshot()),before);assert.equal(h.api.history.undo,0);
+ inputValue(h.$('pickupLength'),0);meterRow(h,0,{denominator:0});h.api.applyMeter();assert.equal(h.$('meterError').hidden,false);
+ h.$('meterDialog').close();assert.deepEqual(plain(h.api.snapshot()),before);
+});
+
+test('bar counter follows playback and bar navigation seeks through pickup and meter changes',()=>{
+ const advanced=advancedConfig({firstBar:42,pickup:1,meters:[{bar:42,numerator:3,denominator:1},{bar:43,numerator:11,denominator:8}]});
+ const h=boot();h.open(project(Array.from({length:41},(_,i)=>i*.5),{advanced}));h.api.attachMedia();
+ h.api.seekTo(0);assert.match(h.$('barCounter').textContent,/41.*3\/1/);
+ h.api.seekTo(.5);assert.match(h.$('barCounter').textContent,/42.*3\/1/);
+ h.$('goBar').value='43';h.$('goBarButton').click();assert.equal(h.media.currentTime,6.5);assert.equal(h.api.view.start,6.5);assert.equal(h.api.view.end,9.25);assert.equal(h.api.view.follow,false);
+ assert.match(h.$('barCounter').textContent,/43.*11\/8/);
+ h.media.currentTime=9.3;h.media.paused=false;h.api.animatePlayback(100);assert.match(h.$('barCounter').textContent,/44.*11\/8/);
+ h.$('goBar').value='999';h.$('goBarButton').click();assert.equal(h.media.currentTime,9.3);
+});
+
+test('advanced graphics select bar layout and row count while ordinary mode keeps its time report',async()=>{
+ const calls=[],make=kind=>({create(data,options){calls.push({kind,data,options});return {svg:'<svg/>',width:1440,height:900};}});
+ const h=boot([],{TempoReport:make('time'),TempoBarReport:make('bars')});h.open(project(Array.from({length:41},(_,i)=>i*.5)));
+ h.$('exportLayout').value='bars';await h.api.exportGraphic('svg');assert.equal(calls.at(-1).kind,'time');
+ enableAdvanced(h);h.$('barsPerRow').value='4';h.api.setView(5,12);h.$('exportScope').value='view';await h.api.exportGraphic('svg');
+ const result=calls.at(-1);assert.equal(result.kind,'bars');assert.equal(result.options.barsPerRow,4);assert.equal(result.options.showBeats,false);assert.equal(result.options.start,5);assert.equal(result.options.end,12);
+ assert.equal(result.data.timeline.anchors[0].time,0,'excerpt keeps the original bar origin');
+ h.$('exportShowBeats').checked=true;await h.api.exportGraphic('svg');assert.equal(calls.at(-1).options.showBeats,true);
+ h.$('exportLayout').value='time';await h.api.exportGraphic('svg');assert.equal(calls.at(-1).kind,'time');
+});
+
+test('explicit musical positions survive timing edits and interpolated taps, then reset only on deliberate beat-unit changes',()=>{
+ const data=project([0,.5,1.5,2.5],{advanced:advancedConfig()});data.beats.forEach((b,i)=>b.quarter=i===0?0:i===1?.25:i-.75);
+ const h=boot();h.open(data);h.api.moveBeat('b1',.6);assert.equal(h.api.state.beats[1].quarter,.25);
+ h.api.seekTo(1.05);h.api.tap();const inserted=h.api.state.beats.find(b=>b.time===1.05);assert.ok(Math.abs(inserted.quarter-.75)<1e-9);
+ assert.ok(h.api.state.beats.every(b=>Number.isFinite(b.quarter)));h.api.persist();assert.ok(h.api.validateProject(h.api.payload()).beats.every(b=>Number.isFinite(b.quarter)));
+ const before=plain(h.api.state.beats);h.api.openMeter();inputValue(h.$('advancedBeatUnit'),32);h.api.applyMeter();
+ assert.equal(h.api.state.options.beatUnit,32);assert.ok(h.api.state.beats.every(b=>b.quarter===undefined));
+ h.api.undo();assert.deepEqual(plain(h.api.state.beats),before);assert.equal(h.api.state.options.beatUnit,1);
+});
+
+test('project import rejects partial, unordered and non-finite musical positions without replacing the session',()=>{
+ const h=boot();h.open(project([1,2,3]));const before=plain(h.api.snapshot());
+ for(const quarters of [[0,undefined,2],[0,2,1],[0,0,1],[0,NaN,1]]){
+  const data=project([0,1,2]);data.beats.forEach((b,i)=>{if(quarters[i]!==undefined)b.quarter=quarters[i];});assert.throws(()=>h.api.validateProject(data));
+ }
+ assert.deepEqual(plain(h.api.snapshot()),before);
+});
+
+test('MIDI import offers tempo, detection and manual modes and preserves source notation only when requested',async()=>{
+ const fixture=midiFixture();
+ for(const mode of ['tempo','detect','manual']){
+  const h=midiHarness();h.api.stubProbe(fixture.parsed.duration);await h.api.loadFile(fixture.file);
+  assert.equal(h.$('midiImportDialog').open,true);assert.equal(h.$('midiImportChoices').hidden,false);assert.equal(h.calls.length,0);
+  await h.api.importMidi(mode);assert.equal(h.calls.length,1);assert.equal(h.api.hasMedia,true);assert.equal(h.api.state.media.kind,'midi');assert.equal(h.api.state.media.name,fixture.file.name);assert.equal(h.api.state.media.size,fixture.file.size);
+  assert.equal(h.$('midiImportDialog').open,false);assert.equal(h.api.state.advanced.enabled,true);
+  if(mode==='tempo'){
+   assert.deepEqual(plain(h.api.state.beats.map(b=>b.quarter)),TempoMidi.importBeats(fixture.parsed,1).map(b=>b.quarter));
+   assert.equal(h.api.state.advanced.firstBar,42);assert.equal(h.api.state.advanced.pickup,1);assert.equal(h.api.state.advanced.meters[1].denominator,8);
+   assert.equal(h.api.analysis.intervals[0].bpm,120);assert.equal(h.api.analysis.intervals[1].bpm,60);
+  }else{assert.equal(h.api.state.beats.length,0);assert.equal(h.api.state.advanced.firstBar,1);}
+  assert.equal(h.$('detectDialog').open,mode==='detect');assert.equal(h.$('beatModeDialog').open,false);
+ }
+});
+
+test('relinking a saved MIDI renders its audio while preserving all corrected beats and meter settings',async()=>{
+ const fixture=midiFixture(),data=project([0,.7,1.8],{duration:fixture.parsed.duration,advanced:advancedConfig({firstBar:-2,meters:[{bar:-2,numerator:7,denominator:16}]}),media:{name:fixture.file.name,size:fixture.file.size,type:'audio/midi',kind:'midi'}});
+ data.beats.forEach((b,i)=>b.quarter=i);data.beats[2].expressionBefore='fermata';
+ const h=midiHarness();h.open(data);const before=plain(h.api.snapshot());h.api.stubProbe(fixture.parsed.duration);
+ await h.api.loadFile(fixture.file,true);assert.equal(h.api.hasMedia,true);assert.equal(h.calls.length,1);assert.deepEqual(plain(h.api.snapshot()),before);assert.equal(h.$('midiImportDialog').open,false);assert.equal(h.$('detectDialog').open,false);
+});
+
+test('cancelled MIDI rendering and stale parsing cannot replace the active session',async()=>{
+ const fixture=midiFixture();let renderRequest;
+ const h=midiHarness({TempoMidiAudio:{render(parsed,options){return new Promise(resolve=>renderRequest={parsed,options,resolve});}}});
+ await h.api.loadMidiFile(fixture.file);const rendering=h.api.importMidi('tempo');h.$('midiImportDialog').close();assert.equal(renderRequest.options.signal.aborted,true);
+ renderRequest.resolve({blob:new Blob(['late']),peaks:new Float32Array()});await rendering;assert.equal(h.api.state.media,null);assert.equal(h.api.hasMedia,false);
+ let resolveOld;const oldFile={name:'old.mid',size:10,arrayBuffer(){return new Promise(resolve=>resolveOld=resolve);}};
+ const stale=h.api.loadMidiFile(oldFile);await h.api.loadMidiFile(fixture.file);resolveOld(new Uint8Array([1,2,3]).buffer);await stale;
+ assert.equal(h.$('midiImportError').hidden,true,'late parser failure cannot replace current choices');assert.equal(h.$('midiImportChoices').hidden,false);
+});
+
+test('a project switch cancels an in-flight MIDI render before it can open a replacement prompt',async()=>{
+ const fixture=midiFixture();let pending;
+ const h=midiHarness({TempoMidiAudio:{render(parsed,options){return new Promise(resolve=>pending={options,resolve});}}});h.api.stubProbe(fixture.parsed.duration);
+ await h.api.loadMidiFile(fixture.file);const rendering=h.api.importMidi('tempo');h.open(project([1,2,3]));const before=plain(h.api.state);
+ assert.equal(pending.options.signal.aborted,true);
+ pending.resolve({blob:new Blob(['late']),peaks:new Float32Array()});await rendering;assert.deepEqual(plain(h.api.state),before);assert.equal(h.$('confirmDialog').open,false);
+});
+
+test('tempo MIDI export and target conversion leave the project unchanged and report invalid alignment',async()=>{
+ const fixture=midiFixture(),downloads=[],h=boot();h.open(project(Array.from({length:25},(_,i)=>i*.75),{advanced:advancedConfig({firstBar:5,meters:[{bar:5,numerator:11,denominator:8}]})}));h.api.captureDownloads((content,name,type)=>downloads.push({content,name,type}));
+ const before=plain(h.api.state);h.api.exportMidiMap();assert.equal(downloads.length,1);assert.match(downloads[0].name,/\.tempo\.mid$/);const tempo=TempoMidi.parse(downloads[0].content);assert.equal(tempo.notes.length,0);assert.equal(tempo.timeSignatures[0].numerator,11);assert.equal(tempo.notation.firstBar,5);
+ h.api.openMidiConvert();await h.api.chooseMidiTarget(fixture.file);assert.equal(h.$('midiTargetName').textContent,fixture.file.name);h.$('midiOffset').value='2';h.api.convertMidi();assert.equal(downloads.length,2);assert.match(downloads[1].name,/\.retimed\.mid$/);
+ const converted=TempoMidi.parse(downloads[1].content);assert.equal(converted.tempoEvents.find(e=>e.quarter===2).bpm,80);assert.deepEqual(plain(h.api.state),before);
+ h.$('midiOffset').value='-1';h.api.convertMidi();assert.equal(downloads.length,2);assert.equal(h.$('midiConvertError').hidden,false);assert.deepEqual(plain(h.api.state),before);
+});
+
+test('MIDI detection analyzes synthesized audio and can replace the score pulse with an unrelated detected tempo',async()=>{
+ const fixture=midiFixture();let detection;
+ const h=midiHarness({TempoDetectionClient:{clear(){},async run(file,duration,options){detection={file,duration,options};return detected([0,.4,.8,1.2,1.6,2]);}}});
+ h.api.stubProbe(fixture.parsed.duration);await h.api.loadMidiFile(fixture.file);await h.api.importMidi('detect');await h.api.runDetection();
+ assert.equal(detection.file.type,'audio/wav');assert.equal(detection.duration,fixture.parsed.duration);assert.equal(h.api.state.beats.length,0,'detection still needs explicit Apply');
+ h.api.applyDetection();assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[0,.4,.8,1.2,1.6,2]);assert.ok(h.api.state.beats.every(b=>b.quarter===undefined));assert.equal(h.api.analysis.stats.mean,150);
+});
+
+test('a stale conversion-target parse cannot replace the last selected MIDI or report its old failure',async()=>{
+ const fixture=midiFixture(),downloads=[],h=boot();h.open(project([0,1,2,3],{advanced:advancedConfig()}));h.api.captureDownloads((content,name)=>downloads.push({content,name}));h.api.openMidiConvert();
+ let finish;const old=h.api.chooseMidiTarget({name:'obsolete.mid',arrayBuffer:()=>new Promise(resolve=>finish=resolve)});
+ await h.api.chooseMidiTarget(fixture.file);finish(Uint8Array.from([0,1,2]).buffer);await old;
+ assert.equal(h.$('midiTargetName').textContent,fixture.file.name);assert.equal(h.$('midiConvertError').hidden,true);h.api.convertMidi();assert.equal(downloads.length,1);assert.match(downloads[0].name,/performance\.retimed\.mid$/);
+});
+
+test('scoped MIDI detection preserves outside score positions and meter alignment while replacing interior pulse timing',async()=>{
+ const fixture=midiFixture();let request;
+ const h=midiHarness({TempoDetectionClient:{clear(){},async run(file,duration,options){request={options};return detected([5,6.2,7.6,9.1,10.7,12]);}}});
+ h.api.stubProbe(fixture.parsed.duration);await h.api.loadMidiFile(fixture.file);await h.api.importMidi('tempo');
+ const original=plain(h.api.snapshot()),outside=original.beats.filter(b=>b.time<5||b.time>12),bar43=h.api.musicalTimeline.bars.find(b=>b.number===43).start;
+ h.api.setView(5,12);h.api.openDetection();h.$('detectScope').value='view';h.$('detectAnchors').checked=false;await h.api.runDetection();assert.deepEqual(plain(request.options.anchors),[]);h.api.applyDetection();
+ for(const previous of outside){const retained=h.api.state.beats.find(b=>b.id===previous.id);assert.ok(retained);assert.equal(retained.time,previous.time);assert.equal(retained.quarter,previous.quarter);assert.equal(retained.tempoAnchor,previous.tempoAnchor);}
+ const added=h.api.state.beats.filter(b=>b.source==='auto');assert.deepEqual(plain(added.map(b=>b.time)),[5,6.2,7.6,9.1,10.7,12]);assert.ok(added.every(b=>Number.isFinite(b.quarter)));
+ assert.ok(Math.abs(added[0].quarter-(5+8/7))<1e-9,'new pulse positions span retained musical boundaries, rather than inheriting the old tempo map');
+ assert.equal(h.api.musicalTimeline.bars.find(b=>b.number===43).start,bar43);assert.equal(h.api.validateProject(h.api.payload()).beats.length,h.api.state.beats.length);
+ h.api.undo();assert.deepEqual(plain(h.api.snapshot()),original);
+});
+
+test('off-grid MIDI tempo anchors stay in analysis and projects but never become extra audible or exported clicks',async()=>{
+ const fixture=midiFixture(),auditions=[],exports=[],downloads=[],detection=[];
+ const h=midiHarness({TempoDetectionClient:{clear(){},async run(file,duration,options){detection.push(options);return detected([0,1,2,3]);}},TempoClicks:{create(){return {setBeats(beats){auditions.push(plain(beats));},reset(){},enabled:false};}},TempoExportClient:{async audio(file,options){exports.push(options);return new Blob(['wave']);}}});
+ h.api.captureDownloads((content,name)=>downloads.push({content,name}));h.api.stubProbe(fixture.parsed.duration);await h.api.loadMidiFile(fixture.file);await h.api.importMidi('tempo');
+ const marker=h.api.state.beats.find(b=>b.tempoAnchor);assert.ok(marker);assert.equal(marker.quarter,.25);assert.equal(marker.time,.125);
+ assert.ok(h.api.analysis.intervals.some(p=>p.beatId===marker.id));assert.equal(h.api.analysis.intervals[0].bpm,120);assert.equal(h.api.analysis.intervals[1].bpm,60);
+ const ordinary=h.api.state.beats.filter(b=>!b.tempoAnchor);assert.deepEqual(auditions.at(-1).map(b=>b.time),plain(ordinary.map(b=>b.time)));assert.equal(h.$('beatCount').textContent,ordinary.length+' beats');
+ h.api.persist();const restored=h.api.validateProject(JSON.parse(h.storage.get('tempo-trace.session.v1')));assert.equal(restored.beats.find(b=>b.id===marker.id).tempoAnchor,true);
+ for(const button of ['saveClicks','saveMix']){h.$(button).click();await h.api.exportAudio();assert.ok(exports.at(-1).beats.every(b=>!b.tempoAnchor));assert.deepEqual(plain(exports.at(-1).beats.map(b=>b.time)),plain(ordinary.map(b=>b.time)));}
+ h.api.exportMidiMap();const midi=TempoMidi.parse(downloads.at(-1).content);assert.ok(midi.tempoEvents.some(e=>e.quarter===.25),'MIDI tempo map must retain the inaudible change anchor');
+ h.api.openDetection();await h.api.runDetection();assert.ok(detection[0].anchors.every(b=>!b.tempoAnchor));assert.equal(detection[0].anchors.length,ordinary.length);
 });

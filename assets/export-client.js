@@ -12,7 +12,6 @@
         if(end<=start)throw new Error('Seleziona un tratto valido.');
         if(options.mode==='mix'){
           if(!file)throw new Error('Collega il file originale per esportare audio e beat.');
-          if(file.size>128*1024*1024||options.duration>1800)throw new Error('Per il mix usa un file entro 30 minuti e 128 MB.');
           onProgress?.({stage:'Decodifica',progress:0});
           const AudioCtx=window.OfflineAudioContext||window.webkitOfflineAudioContext;
           if(!AudioCtx)throw new Error('Esportazione audio non disponibile in questo browser.');

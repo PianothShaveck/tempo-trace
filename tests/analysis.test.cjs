@@ -383,3 +383,95 @@ test('isolated extra taps cannot hijack the base tempo and expressive overrides 
  for(const beat of ramp)beat.expressionBefore='none';
  assert.equal(analyze(ramp).stats.perceived.status,'ok');
 });
+
+function positionedBeats(spans, start = 0, quarter = 0) {
+  const beats = [{id:'position-0',time:start,quarter}];
+  for (const [quarters, bpm] of spans) {
+    const previous = beats.at(-1);
+    beats.push({id:'position-'+beats.length,time:previous.time+60*quarters/bpm,quarter:previous.quarter+quarters});
+  }
+  return beats;
+}
+
+test('positioned MIDI tempo anchors between grid beats preserve exact BPM and covered-quarter means', () => {
+  const spans = [...Array.from({length:20},()=>[1,66]), [.25,66], [.75,90], ...Array.from({length:20},()=>[1,90])];
+  const beats = positionedBeats(spans, 5), snapshot=structuredClone(beats);
+  const result = analyze(beats);
+  const boundary=beats[21].time;
+  assert.equal(result.intervals.length,42);
+  near(result.intervals[20].quarters,.25);
+  near(result.intervals[21].quarters,.75);
+  near(result.intervals[20].bpm,66);
+  near(result.intervals[21].bpm,90);
+  near(result.stats.mean,41*60/(20.25*60/66+20.75*60/90));
+  assert.equal(result.anomalies.length,0);
+  assert.equal(result.events.length,0);
+  assert.equal(result.sections.length,2);
+  near(result.sections[0].end,boundary);
+  near(result.sections[0].bpm,66);
+  near(result.sections[1].bpm,90);
+  near(result.sections[0].quarters,20.25);
+  near(result.sections[1].quarters,20.75);
+  assert.deepEqual(beats,snapshot);
+  const manual=analyze(beats,{beatUnit:.5},[boundary]);
+  near(manual.stats.mean,result.stats.mean);
+  near(manual.sections[0].bpm,66);
+  near(manual.sections[1].bpm,90);
+});
+
+test('mixed musical beat lengths do not invent anomalies, holds or tempo changes', () => {
+  const spans = Array.from({length:64},(_,i)=>[[4,1,.5,1.5,4/11][i%5],78]);
+  const result=analyze(positionedBeats(spans));
+  assert.equal(result.anomalies.length,0);
+  assert.equal(result.events.length,0);
+  assert.equal(result.sections.length,1);
+  for(const p of result.intervals)near(p.bpm,78);
+  near(result.stats.mean,78);
+  near(result.sections[0].bpm,78);
+  near(result.stats.perceived.bpm,78);
+});
+
+test('positioned gaps omit both unmeasured quarters and elapsed time from merged means', () => {
+  const first=positionedBeats(Array.from({length:20},()=>[.5,72]));
+  const second=positionedBeats(Array.from({length:15},()=>[1.5,72]),100,80).map((b,i)=>({...b,id:'second-'+i,breakBefore:i===0}));
+  for(const boundaries of [null,[],[100]]){
+    const result=analyze([...first,...second],{},boundaries);
+    near(result.stats.mean,72);
+    near(result.sections.reduce((sum,s)=>sum+s.quarters,0),32.5);
+    for(const section of result.sections)near(section.bpm,72);
+    assert.equal(result.intervals.length,35);
+    assert.equal(result.intervals.filter(p=>p.breakBefore).length,2);
+    assert.ok(result.intervals.every(p=>p.end-p.start<2));
+  }
+  assert.equal(analyze([...first,...second]).sections.length,1);
+});
+
+test('any positive finite beat unit is supported, while invalid explicit spans use the chosen unit', () => {
+  const plain=constant(60,10);
+  near(analyze(plain,{beatUnit:32}).stats.mean,1920);
+  near(analyze(plain,{beatUnit:1/31}).stats.mean,60/31);
+  for(const beatUnit of [0,-1,Infinity,NaN])near(analyze(plain,{beatUnit}).stats.mean,60);
+  const beats=[{time:0,quarter:1},{time:1,quarter:2},{time:2,quarter:2},{time:3},{time:4,quarter:4}];
+  const result=analyze(beats,{beatUnit:.5});
+  assert.deepEqual(result.intervals.map(p=>p.quarters),[1,.5,.5,.5]);
+  near(result.stats.mean,37.5);
+});
+
+test('normalization retains finite musical positions without changing the original records', () => {
+  const beats=[{time:0,quarter:-.5},{time:1,quarter:NaN},{time:2,quarter:Infinity},{time:3,quarter:'4'},{time:4},{time:4,quarter:7}];
+  const snapshot=structuredClone(beats),normalized=normalizeBeats(beats);
+  assert.equal(normalized[0].quarter,-.5);
+  for(const index of [1,2,3])assert.equal(Object.hasOwn(normalized[index],'quarter'),false);
+  assert.equal(normalized[4].quarter,7);
+  assert.deepEqual(beats,snapshot);
+});
+
+test('densely inserted tempo anchors cannot outweigh a longer recurring pulse', () => {
+  const spans=[...Array.from({length:20},()=>[1,66]),...Array.from({length:200},()=>[.005,100]),...Array.from({length:20},()=>[1,66])];
+  const result=analyze(positionedBeats(spans),{},[]);
+  near(result.stats.perceived.bpm,66);
+  near(result.sections[0].perceived.bpm,66);
+  near(result.stats.mean,41*60/(40*60/66+60/100));
+  assert.equal(result.anomalies.length,0);
+  assert.equal(result.events.length,0);
+});

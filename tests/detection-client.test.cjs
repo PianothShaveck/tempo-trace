@@ -50,16 +50,16 @@ test('decoded audio is shared while pending and cached until clear, without leak
   assert.equal(h.reads, 2); assert.equal(h.contexts.length, 2); assert.equal(h.contexts[1].closed, 1);
 });
 
-test('failed decoding clears the cache so retry is possible, and input limits prevent reads', async () => {
+test('failed decoding clears the cache and large or long files can still be decoded', async () => {
   const h = harness({decode: (_bytes, count) => count === 1 ? Promise.reject(new Error('codec')) : Promise.resolve(audio())});
   await assert.rejects(h.client.decode(h.file, 10), /Audio non decodificabile/);
   const result = await h.client.decode(h.file, 10);
   assert.equal(result.samples.length, 100); assert.equal(h.reads, 2);
   assert.ok(h.contexts.every(context => context.closed === 1));
   const before = h.reads;
-  await assert.rejects(h.client.decode({...h.file, size: 129 * 1024 * 1024}, 10), /128 MB/);
-  await assert.rejects(h.client.decode(h.file, 1801), /30 minuti/);
-  assert.equal(h.reads, before);
+  await h.client.decode({...h.file, size: 129 * 1024 * 1024}, 10);
+  await h.client.decode(h.file, 1801);
+  assert.equal(h.reads, before + 2);
 });
 
 test('opposite-phase stereo keeps a real channel instead of becoming silence', async () => {

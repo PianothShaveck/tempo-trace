@@ -10,6 +10,7 @@
   const perceived=estimate=>Number.isFinite(estimate?.bpm)?'≈ '+number(Math.round(estimate.bpm)):estimate?.status==='variable'?t('Variabile'):'—';
   const colors={trend:'#088d7c',accelerando:'#b75b12',rallentando:'#515fbd',fermata:'#9467a4'};
   const analysis=project.analysis||{},stats=analysis.stats||{},sections=analysis.sections||[],intervals=analysis.intervals||[],beats=project.beats||[];
+  const audibleBeats=beats.filter(b=>!b.tempoAnchor),tempoAnchors=new Set(beats.filter(b=>b.tempoAnchor).map(b=>b.id));
   const width=1440,height=818+Math.max(1,Math.ceil(sections.length/3))*84,start=options.start||0,end=Math.max(start+.1,options.end||project.duration||30);
   const scale=options.scale||{min:0,max:Math.max(160,...intervals.map(p=>p.bpm))},min=scale.min,max=Math.max(min+1,scale.max);
   const left=94,right=1376,top=294,bottom=showBeats?618:652,plotWidth=right-left,plotHeight=bottom-top;
@@ -22,7 +23,7 @@
   text(64,70,'TEMPO TRACE',14,'#0c8279','font-weight="700" letter-spacing="2"');
   text(1376,70,time(start,end-start<10)+' — '+time(end,end-start<10),14,'#526475','text-anchor="end"');
   const title=String(project.title||t('Esecuzione'));text(64,117,title.length>81?title.slice(0,80)+'…':title,27,'#172d3b','font-weight="700"');
-  text(64,148,t('{0} beat · BPM in semiminime',beats.length),13);
+  text(64,148,t('{0} beat · BPM in semiminime',audibleBeats.length),13);
   const cards=[['TEMPO DI BASE',perceived(stats.perceived)],['MEDIO',number(stats.mean)],['INIZIALE',number(stats.start)],['FINALE',number(stats.end)],['INTERVALLO',number(stats.min)+'–'+number(stats.max)]];
   cards.forEach(([name,value],i)=>{const px=64+i*265,cardWidth=252;rect(px,175,cardWidth,88,i===0?'#e8f7f3':'#f3f6fa',10);text(px+16,200,t(name),11,'#526475','letter-spacing="1"');text(px+16,239,value,i===4?24:i===0&&stats.perceived?.status==='variable'?23:29,i===0?'#087c6e':'#172d3b','font-weight="700"');if(i!==0||Number.isFinite(stats.perceived?.bpm))text(px+cardWidth-16,252,'BPM',10,'#526475','text-anchor="end"');});
   out.push(`<defs><clipPath id="reportPlot"><rect x="${left}" y="${top}" width="${plotWidth}" height="${plotHeight}"/></clipPath></defs>`);
@@ -54,12 +55,12 @@
   for(const [kind,d] of paths)out.push(`<path data-expression="${kind}" d="${d}" fill="none" stroke="${colors[kind]}" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"/>`);
   if(showBeats){
   const seen=new Set();
-  for(const p of intervals){const px=x(p.end),py=Math.max(top+6,Math.min(bottom-6,y(p.bpm))),pixel=Math.round(px)+','+Math.round(py);if(seen.has(pixel))continue;seen.add(pixel);
+  for(const p of intervals){if(tempoAnchors.has(p.beatId))continue;const px=x(p.end),py=Math.max(top+6,Math.min(bottom-6,y(p.bpm))),pixel=Math.round(px)+','+Math.round(py);if(seen.has(pixel))continue;seen.add(pixel);
    if(p.bpm<min||p.bpm>max){const dir=p.bpm>max?-1:1;out.push(`<path d="M${px} ${py+dir*5}L${px-5} ${py-dir*3}H${px+5}Z" fill="#bb7324"><title>${escape(number(p.bpm)+' BPM')}</title></path>`);}
    else if(p.expressive==='fermata'||p.expressive==='possible-fermata')out.push(`<path d="M${px} ${py-5}L${px+5} ${py}L${px} ${py+5}L${px-5} ${py}Z" fill="${p.expressive==='fermata'?'#a77cb7':'white'}" stroke="#a77cb7" stroke-width="1.5"/>`);
    else out.push(`<circle cx="${px}" cy="${py}" r="${intervals.length<160?3:1.6}" fill="${p.anomaly?'#bd7523':'#9175cc'}"/>`);
   }
-  const starts=new Set(beats.map(b=>b.time)),measured=new Set(intervals.map(p=>p.end));
+  const starts=new Set(audibleBeats.map(b=>b.time)),measured=new Set(intervals.map(p=>p.end));
   for(const p of intervals.filter(p=>p.breakBefore&&starts.has(p.start)&&!measured.has(p.start))){
     const px=x(p.start),py=Math.max(top+6,Math.min(bottom-6,y(p.bpm)));
     out.push(`<rect x="${px-4}" y="${py-4}" width="8" height="8" rx="1.5" fill="white" stroke="#9175cc" stroke-width="1.5"><title>${escape(t('Ripresa: BPM dal beat successivo'))}</title></rect>`);
@@ -67,7 +68,7 @@
   }
   out.push('</g>');
   if(showBeats){rect(left,635,plotWidth,23,'#eef2f7',4);text(left-12,651,'Beat',10,'#526475','text-anchor="end"');
-  const ticks=[],pixels=new Set();for(const b of beats){const px=Math.round(x(b.time));if(px<left||px>right||pixels.has(px))continue;pixels.add(px);ticks.push(`M${px} 641V652`);}out.push(`<path d="${ticks.join(' ')}" stroke="#9175cc"/>`);
+  const ticks=[],pixels=new Set();for(const b of audibleBeats){const px=Math.round(x(b.time));if(px<left||px>right||pixels.has(px))continue;pixels.add(px);ticks.push(`M${px} 641V652`);}out.push(`<path d="${ticks.join(' ')}" stroke="#9175cc"/>`);
   }
   let legendX=64;
   const legend=(label,color,width,dashed=false)=>{out.push(`<path d="M${legendX} 716h22" stroke="${color}" stroke-width="3"${dashed?' stroke-dasharray="4 4"':''}/>`);text(legendX+30,720,t(label),12,color);legendX+=width;};
