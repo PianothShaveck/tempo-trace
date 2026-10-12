@@ -600,3 +600,39 @@ test('beat list supports checkboxes and selecting all across pages without requi
  h.$('nextPage').click();assert.ok(h.$('beatTable').children.every(row=>row.children[0].children[0].checked));
  h.$('selectAllBeats').checked=false;h.$('selectAllBeats').dispatch('change');assert.equal(h.api.state.selection.length,0);assert.equal(h.api.state.selectedId,null);
 });
+
+test('manual expression can be added without detection, edited, removed, undone and reimported',()=>{
+ const h=boot();h.open(project([1,1.5,2,2.5,3,3.5,4]));assert.equal(h.$('expressionPanel').hidden,false);assert.equal(h.$('addExpression').disabled,false);
+ h.api.selectBeat('b2');h.$('addExpression').click();assert.equal(h.$('expressionStart').value,'1.500');assert.equal(h.$('expressionEnd').value,'2.000');
+ h.$('expressionForm').dispatch('submit');assert.equal(h.api.analysis.events[0].type,'fermata');assert.equal(h.api.analysis.events[0].confidence,'manual');
+ const saved=plain(h.api.payload());const fresh=boot();fresh.open(saved);assert.equal(fresh.api.analysis.events[0].type,'fermata');
+ h.$('expressionList').children[0].children.at(-1).click();h.$('expressionType').value='rallentando';h.$('expressionStart').value='2';h.$('expressionEnd').value='3.5';h.$('expressionForm').dispatch('submit');
+ assert.equal(h.api.analysis.events.length,1);assert.equal(h.api.analysis.events[0].type,'rallentando');assert.equal(h.api.analysis.events[0].start,2);assert.equal(h.api.analysis.events[0].end,3.5);
+ h.$('expressionList').children[0].children.at(-1).click();h.$('deleteExpression').click();assert.equal(h.api.analysis.events.length,0);h.api.undo();assert.equal(h.api.analysis.events[0].type,'rallentando');
+ h.$('addExpression').click();h.$('expressionStart').value='3';h.$('expressionEnd').value='2';const before=h.api.history.undo;h.$('expressionForm').dispatch('submit');assert.equal(h.$('expressionError').hidden,false);assert.equal(h.api.history.undo,before);
+});
+
+test('track start is nondestructive, changes statistics, playback start and exports, and survives undo/import',async()=>{
+ let report;
+ const h=boot([],{TempoReport:{create(project,options){report={project,options};return {svg:'<svg/>',width:100,height:100};}}});
+ h.open(project([0,1,2,3,10,10.5,11,11.5,12]));h.api.attachMedia();h.api.seekTo(10);h.$('trackStartButton').click();h.$('useTrackCursor').click();h.$('trackStartForm').dispatch('submit');
+ assert.equal(h.api.state.musicStart,10);assert.equal(h.api.state.beats.length,9);assert.equal(h.api.analysis.stats.mean,120);assert.equal(h.api.analysis.intervals[0].start,10);
+ h.api.seekTo(15);h.$('restartButton').click();assert.equal(h.media.currentTime,10);h.api.seekTo(0);h.press('Space');assert.equal(h.media.currentTime,10);
+ await h.api.exportGraphic('svg');assert.equal(report.options.start,10);assert.deepEqual(plain(report.project.beats.map(b=>b.time)),[10,10.5,11,11.5,12]);
+ const fresh=boot();fresh.open(plain(h.api.payload()));assert.equal(fresh.api.state.musicStart,10);assert.equal(fresh.api.analysis.stats.mean,120);
+ h.api.undo();assert.equal(h.api.state.musicStart,0);assert.equal(h.api.analysis.intervals[0].start,0);h.api.redo();assert.equal(h.api.state.musicStart,10);
+ h.$('trackStartButton').click();h.$('trackStartTime').value='30';h.$('trackStartForm').dispatch('submit');assert.equal(h.$('trackStartError').hidden,false);assert.equal(h.api.state.musicStart,10);
+});
+
+test('detection starts at the custom track start and preserves earlier beats',async()=>{
+ const h=detectionHarness();h.open(project([0,1,2,10,11]));h.api.attachFile();
+ h.$('trackStartButton').click();h.$('trackStartTime').value='10';h.$('trackStartForm').dispatch('submit');
+ h.api.openDetection();h.$('detectAnchors').checked=false;const pending=h.api.runDetection();assert.equal(h.requests[0].options.start,10);
+ h.requests[0].resolve(detected([10,10.5,11,11.5]));await pending;h.api.applyDetection();assert.deepEqual(plain(h.api.state.beats.filter(b=>b.time<10).map(b=>b.time)),[0,1,2]);
+});
+
+test('project validation rejects unsupported expression overrides and invalid track starts',()=>{
+ const h=boot();for(const musicStart of [-1,30,'1',NaN])assert.throws(()=>h.api.validateProject(project([1,2],{musicStart})));
+ assert.throws(()=>h.api.validateProject(project([],{beats:[{time:1,expressionBefore:'invalid'}]})));
+ assert.equal(h.api.validateProject(project([1,2])).musicStart,0);
+});

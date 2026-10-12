@@ -54,7 +54,8 @@
       id: b.id == null ? 'beat-' + index : b.id,
       time: b.time,
       breakBefore: b.breakBefore === true,
-      fermataBefore: b.fermataBefore === true
+      fermataBefore: b.fermataBefore === true,
+      ...(['fermata','accelerando','rallentando','none'].includes(b.expressionBefore)?{expressionBefore:b.expressionBefore}:{})
     })).sort((a, b) => a.time - b.time);
     const result = [];
     for (const beat of sorted) {
@@ -62,6 +63,7 @@
       if (previous && previous.time === beat.time) {
         previous.breakBefore = previous.breakBefore || beat.breakBefore;
         previous.fermataBefore = previous.fermataBefore || beat.fermataBefore;
+        if(beat.expressionBefore!=null)previous.expressionBefore=beat.expressionBefore;
       } else result.push(beat);
     }
     return result;
@@ -370,7 +372,7 @@
       const bpm = 60 * unit / (end - start);
       if (!(end > start) || !Number.isFinite(bpm) || bpm <= 0) continue;
       const interval = {index: intervals.length, start, end, time: start + (end - start) / 2,
-        bpm, smoothed: bpm, anomaly: null, expressive: beats[i].fermataBefore ? 'fermata' : null,
+        bpm, smoothed: bpm, anomaly: null, manualExpression:beats[i].expressionBefore, expressive: beats[i].expressionBefore==='fermata'||beats[i].fermataBefore ? 'fermata' : null,
         beatId: beats[i].id, breakBefore: current.length === 0};
       intervals.push(interval);
       current.push(interval);
@@ -382,13 +384,27 @@
     let events = [];
     for (const group of groups) {
       markAnomalies(group);
-      events = events.concat(detectRamps(group));
-      for (const interval of group) if (isHold(interval)) events.push({
-        type: interval.expressive,
-        label: interval.expressive === 'fermata' ? 'Fermata' : 'Fermata o tap mancanti?',
-        start: interval.start, end: interval.end, beatId: interval.beatId,
-        confidence: interval.expressive === 'fermata' ? 'manual' : 'candidate'
-      });
+      detectRamps(group);
+      for(const interval of group){
+        if(interval.manualExpression){
+          interval.expressive=interval.manualExpression==='none'?null:interval.manualExpression;
+          if(interval.expressive)interval.anomaly=null;
+        }
+      }
+      // Rebuild runs after overrides so an edited/suppressed passage cannot
+      // leave an automatic event spanning across it.
+      let previousEvent=null;
+      for(const interval of group){
+        const type=interval.expressive;
+        if(!type){previousEvent=null;continue;}
+        const confidence=interval.manualExpression||type==='fermata'?'manual':type==='possible-fermata'?'candidate':'detected';
+        const merge=(isRamp(interval)||interval.manualExpression==='fermata')&&previousEvent&&previousEvent.type===type&&previousEvent.confidence===confidence&&previousEvent.end===interval.start;
+        if(merge){previousEvent.end=interval.end;if(isHold(interval))previousEvent.beatId=interval.beatId;}
+        else{
+          previousEvent={type,label:type==='possible-fermata'?'Fermata o tap mancanti?':type==='fermata'?'Fermata':type==='accelerando'?'Accelerando':'Rallentando',start:interval.start,end:interval.end,...(isHold(interval)?{beatId:interval.beatId}:{}),confidence};
+          events.push(previousEvent);
+        }
+      }
       smoothGroup(group, config.smoothing);
       sections = sections.concat(segmentGroup(group, config, unit));
     }

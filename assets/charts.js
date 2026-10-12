@@ -360,6 +360,11 @@
         }
         plot.append(node('path',{d:path,stroke:'#668d9a','stroke-width':1.2,'stroke-opacity':.78,fill:'none'}));
       }
+      if(state.musicStart>0){
+        const boundary=g.x(state.musicStart);
+        plot.append(node('rect',{x:g.left,y:g.top,width:Math.max(0,boundary-g.left),height:g.plotHeight,fill:'#000','fill-opacity':.45}));
+        plot.append(node('line',{x1:boundary,x2:boundary,y1:g.top,y2:g.top+g.plotHeight,stroke:palette.teal,'stroke-width':2}));
+      }
       if(finite(state.detailStart)&&finite(state.detailEnd)&&state.detailEnd-state.detailStart<g.end-g.start-.01){
         plot.append(node('rect',{x:g.x(state.detailStart),y:g.top,width:Math.max(1,g.x(state.detailEnd)-g.x(state.detailStart)),height:g.plotHeight,fill:palette.teal,'fill-opacity':.08,stroke:palette.teal,'stroke-opacity':.5,'pointer-events':'none'}));
       }

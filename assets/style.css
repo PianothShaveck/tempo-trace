@@ -31,3 +31,7 @@ dialog{background:#14202b;color:var(--text);border:1px solid #3a4d5b;border-radi
 @media(max-width:640px){.language-prompt{margin:-12px 0 12px}.expression-item{flex-wrap:wrap;gap:0;padding-bottom:4px}.expression-item .expression-row{flex-basis:100%}.confirm-fermata{margin-left:auto;min-height:32px}.expression-row .event-tag{font-size:8px}}
 
 .bulk-editor{display:flex;align-items:center;gap:18px;padding:14px 22px 24px}.offset-count{margin-right:auto;align-self:center;color:var(--muted);font-size:12px}.workspace-foot{flex-wrap:wrap;gap:16px}#selectedNumber{font-size:12px}td input[type=checkbox],th input[type=checkbox]{width:16px;height:16px;accent-color:var(--teal)}
+
+.expression-tools{display:flex;justify-content:flex-end;padding:0 22px}.expression-item>.text-button{flex:none}.expression-item .expression-row{width:auto}
+
+#trackStartButton{margin-left:auto;font-variant-numeric:tabular-nums;flex:none;font-size:11px}.session-heading{flex-wrap:wrap}

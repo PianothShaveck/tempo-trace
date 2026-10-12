@@ -3,6 +3,24 @@
 (function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;else root.TempoI18n=api;})(globalThis,function(){
  'use strict';
  const messages=Object.freeze({
+  "Inizio": "Start",
+  "Inizio brano": "Track start",
+  "Inizio brano non valido.": "Invalid track start.",
+  "Usa il cursore": "Use playhead",
+  "Imposta l’inizio del brano; escludi l’introduzione senza eliminare beat": "Set the start of the music; exclude the introduction without deleting beats",
+  "{0} beat aggiunti.": "{0} beats added."
+,
+  "Modifica agogica a {0}": "Edit expression at {0}",
+  "Agogica non valida.": "Invalid expression data.",
+  "Scegli un inizio e una fine validi.": "Choose valid start and end times.",
+  "Il tratto deve comprendere almeno due beat collegati.": "The range must contain at least two connected beats.",
+  "Tipo": "Type",
+  "Nessuna agogica": "No expression",
+  "Inizio (secondi)": "Start (seconds)",
+  "Fine (secondi)": "End (seconds)",
+  "Gli estremi si agganciano ai beat più vicini.": "Bounds snap to the nearest beats.",
+  "Elimina": "Delete"
+,
   "Selezione": "Selection",
   "Tutti i beat": "All beats",
   "Intervallo di beat": "Beat range",

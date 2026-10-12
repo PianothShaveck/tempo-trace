@@ -286,3 +286,21 @@ test('manual section boundaries snap to existing starting beats without creating
  const result=analyze(constant(120,20),{},[5.2,5.21,0,-2,10,Infinity]);
  assert.equal(result.sections.length,2);assert.equal(result.sections[1].start,5);assert.equal(result.sections.reduce((n,s)=>n+s.count,0),20);
 });
+
+test('manual expression overrides are authoritative, can suppress detection and do not change measured BPM',()=>{
+ const beats=Array.from({length:40},(_,i)=>({id:String(i),time:i*.5}));
+ beats[10].expressionBefore='fermata';for(let i=20;i<=25;i++)beats[i].expressionBefore='accelerando';
+ let result=analyze(beats);assert.equal(result.stats.mean,120);
+ assert.equal(result.events.find(e=>e.type==='fermata').confidence,'manual');
+ const ramp=result.events.find(e=>e.type==='accelerando');assert.equal(ramp.start,9.5);assert.equal(ramp.end,12.5);assert.equal(ramp.confidence,'manual');
+ beats[22].expressionBefore='none';result=analyze(beats);assert.equal(result.events.filter(e=>e.type==='accelerando').length,2);
+ assert.equal(result.intervals.find(p=>p.beatId==='22').expressive,null);
+});
+
+test('manual fermata runs split at gaps and suppressed possible fermatas stay suppressed',()=>{
+ const beats=Array.from({length:30},(_,i)=>({id:String(i),time:i*.5+(i>=15?2:0)}));
+ assert.ok(analyze(beats).events.some(e=>e.type==='possible-fermata'));
+ beats[15].expressionBefore='none';assert.ok(!analyze(beats).events.some(e=>e.type==='possible-fermata'));
+ for(let i=10;i<=20;i++)beats[i].expressionBefore='fermata';beats[15].breakBefore=true;
+ const events=analyze(beats).events.filter(e=>e.type==='fermata');assert.equal(events.length,2);assert.ok(events[0].end<events[1].start);
+});
