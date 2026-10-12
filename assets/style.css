@@ -35,3 +35,8 @@ dialog{background:#14202b;color:var(--text);border:1px solid #3a4d5b;border-radi
 .expression-tools{display:flex;justify-content:flex-end;padding:0 22px}.expression-item>.text-button{flex:none}.expression-item .expression-row{width:auto}
 
 #trackStartButton{margin-left:auto;font-variant-numeric:tabular-nums;flex:none;font-size:11px}.session-heading{flex-wrap:wrap}
+
+/* Basic tempo and measured average remain separate, with no extra visible explanation. */
+.stats-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.stat{min-width:0}.stat .tempo-variable{font-size:22px;letter-spacing:-.4px}.section-row,.section-tempo-labels{grid-template-columns:28px minmax(70px,1fr) minmax(58px,auto) minmax(62px,auto)}.section-tempo-labels{display:grid;gap:12px;padding:0 26px 5px;font-size:10px;color:var(--muted);text-align:right}.section-reference{font-size:18px;color:var(--teal);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}.section-reference.tempo-variable{font-size:11px}.section-bpm{text-align:right;white-space:nowrap}
+@media(max-width:900px){.stat strong{font-size:25px}.stat .tempo-variable{font-size:19px}.section-row,.section-tempo-labels{gap:8px}.section-bpm{font-size:17px}.section-reference{font-size:16px}}
+@media(max-width:640px){.stats-grid{grid-template-columns:repeat(6,minmax(0,1fr))}.stat{grid-column:span 2}.stat:nth-child(-n+2){grid-column:span 3}.stat strong{font-size:25px}.stat .tempo-variable{font-size:23px}.section-tempo-labels{padding:0 16px 5px;gap:8px}.section-row{gap:8px}.section-range{font-size:10px}.section-bpm small{font-size:8px;margin-left:2px}.section-reference{font-size:16px}}

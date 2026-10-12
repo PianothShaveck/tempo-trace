@@ -3,6 +3,16 @@
 (function(root,factory){const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;else root.TempoI18n=api;})(globalThis,function(){
  'use strict';
  const messages=Object.freeze({
+  "Tempo di base": "Basic tempo",
+  "TEMPO DI BASE": "BASIC TEMPO",
+  "Base": "Basic",
+  "Variabile": "Variable",
+  "Stima della pulsazione ricorrente, con influenza ridotta di fermate, agogica e beat sospetti.": "Estimated recurring pulse, with reduced influence from holds, expression and suspect beats.",
+  "Non emerge un unico tempo di base: il tempo cambia sensibilmente.": "No single basic tempo stands out: the tempo varies substantially.",
+  "Beat stabili insufficienti per stimare il tempo di base.": "Not enough stable beats to estimate basic tempo.",
+  "Sezione {0}, da {1} a {2}. Tempo di base {3}; medio {4} BPM. Mostra e vai all’inizio.": "Section {0}, from {1} to {2}. Basic tempo {3}; average {4} BPM. Show and seek to start.",
+  "Il tempo di base stima la pulsazione ricorrente, riducendo l’influenza di fermate, agogica e beat sospetti. È un riferimento per il tempo percepito, non una misura della percezione. Se non emerge un unico tempo, mostra Variabile; con pochi dati, —.": "Basic tempo estimates the recurring pulse, reducing the influence of holds, expression and suspect beats. It is a reference for perceived tempo, not a measurement of perception. If no single tempo stands out, it shows Variable; with too little data, —."
+,
   "Inizio": "Start",
   "Inizio brano": "Track start",
   "Inizio brano non valido.": "Invalid track start.",

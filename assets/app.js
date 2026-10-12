@@ -24,6 +24,8 @@
   const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
   const number = v => typeof v === 'number' && Number.isFinite(v);
   const bpm = v => number(v) ? v.toLocaleString(TempoI18n.locale, {maximumFractionDigits: 1}) : '—';
+  const perceivedText=estimate=>number(estimate?.bpm)?'≈ '+bpm(Math.round(estimate.bpm)):estimate?.status==='variable'?t('Variabile'):'—';
+  const perceivedTip=estimate=>t(estimate?.status==='ok'?'Stima della pulsazione ricorrente, con influenza ridotta di fermate, agogica e beat sospetti.':estimate?.status==='variable'?'Non emerge un unico tempo di base: il tempo cambia sensibilmente.':'Beat stabili insufficienti per stimare il tempo di base.');
   const uid = () => globalThis.crypto?.randomUUID?.() || `b-${Date.now()}-${++fallbackId}`;
   function formatTime(value, precise = false) {
     const ms = Math.max(0, Math.round((value || 0) * 1000));
@@ -101,7 +103,7 @@
     }
     if(!analysisWorker){
       try{
-        analysisWorker=new Worker('assets/analysis-worker.js?v=8bd07bf16e97');
+        analysisWorker=new Worker('assets/analysis-worker.js?v=b30fdaa08f9f');
         analysisWorker.onerror=fallback;
         analysisWorker.onmessage=event=>{
           workerRunning=false;
@@ -157,6 +159,10 @@
     const selectedInterval = state.selectedId?analysis.intervals.find(i => i.beatId === state.selectedId):analysis.intervals.at(-1);
     $('lastBpm').replaceChildren(document.createTextNode(bpm(selectedInterval?.bpm) + ' '), Object.assign(document.createElement('small'), {textContent: 'BPM'}));
     $('statStart').textContent = bpm(analysis.stats.start); $('statMean').textContent = bpm(analysis.stats.mean); $('statEnd').textContent = bpm(analysis.stats.end);
+    $('statPerceived').textContent=perceivedText(analysis.stats.perceived);
+    $('statPerceived').className=analysis.stats.perceived?.status==='variable'?'tempo-variable':'';
+    $('statPerceived').parentElement.dataset.tip=perceivedTip(analysis.stats.perceived);
+    $('perceivedUnit').hidden=!number(analysis.stats.perceived?.bpm);
     $('statRange').textContent = number(analysis.stats.min) ? `${Math.round(analysis.stats.min)}–${Math.round(analysis.stats.max)}` : '—';
     $('statStart').parentElement.dataset.tip = t('Mediana dei primi intervalli, escluse le fermate.');
     $('statEnd').parentElement.dataset.tip = t('Mediana degli ultimi intervalli, escluse le fermate.');
@@ -175,15 +181,16 @@
     renderSections(); renderAnomalies(); renderExpressions(); renderEditor(); updateViewControls(); renderCharts(); updateClock();
   }
   function renderSections() {
-    const list = $('sectionList'); list.replaceChildren();
+    const list = $('sectionList'); list.replaceChildren();$('sectionTempoLabels').hidden=!analysis.sections.length;
     if (!analysis.sections.length) { list.append(Object.assign(document.createElement('p'), {className:'empty-note',textContent:t('Servono almeno due beat.')})); return; }
     analysis.sections.forEach((section,index) => {
       const row = document.createElement('button'); row.className = 'section-row';
-      row.setAttribute('aria-label', t('Sezione {0}, da {1} a {2}, {3} BPM. Mostra e vai all’inizio.',index+1,formatTime(section.start),formatTime(section.end),bpm(section.bpm)));
+      row.setAttribute('aria-label', t('Sezione {0}, da {1} a {2}. Tempo di base {3}; medio {4} BPM. Mostra e vai all’inizio.',index+1,formatTime(section.start),formatTime(section.end),perceivedText(section.perceived),bpm(section.bpm)));
       const badge = Object.assign(document.createElement('span'), {className:'section-index',textContent:String(index+1)});
       const range = Object.assign(document.createElement('span'), {className:'section-range',textContent:`${formatTime(section.start)} — ${formatTime(section.end)}`});
       const value = Object.assign(document.createElement('span'), {className:'section-bpm',textContent:bpm(section.bpm)});
-      value.append(Object.assign(document.createElement('small'), {textContent:'BPM'})); row.append(badge,range,value);
+      const reference=Object.assign(document.createElement('span'),{className:'section-reference'+(section.perceived?.status==='variable'?' tempo-variable':''),textContent:perceivedText(section.perceived)});reference.dataset.tip=perceivedTip(section.perceived);
+      value.append(Object.assign(document.createElement('small'), {textContent:'BPM'})); row.append(badge,range,reference,value);
       row.addEventListener('click', () => { setFollow(false);viewStart = Math.max(0, section.start - .5); viewEnd = Math.min(extent(), section.end + .5); seekTo(section.start); updateViewControls(); renderCharts(); });
       list.append(row);
     });
@@ -907,7 +914,7 @@
   $('exportButton').addEventListener('click',()=>showDialog('exportDialog'));
   $('saveProject').addEventListener('click',exportProject);
   $('saveBeats').addEventListener('click',()=>{const map=new Map(analysis.intervals.map(i=>[i.beatId,i]));download(csv([['beat','seconds','quarter_note_BPM','trend_BPM','gap_before','confirmed_fermata','expression','flag','source','detection_support','interpolated'],...activeBeats().map((b,i)=>{const interval=map.get(b.id);return[i+1,b.time.toFixed(3),interval?.bpm.toFixed(4),interval?.smoothed?.toFixed(4),b.breakBefore?'yes':'no',b.fermataBefore?'yes':'no',interval?.expressive||'',t(interval?.anomaly||''),b.source||'manual',number(b.confidence)?b.confidence.toFixed(4):'',b.inferred?'yes':'no'];})]),baseName()+'.beat.csv','text/csv;charset=utf-8');});
-  $('saveSections').addEventListener('click',()=>download(csv([['section','start_seconds','end_seconds','mean_quarter_note_BPM','intervals'],...analysis.sections.map((s,i)=>[i+1,s.start.toFixed(3),s.end.toFixed(3),s.bpm.toFixed(4),s.count])]),baseName()+'.sections.csv','text/csv;charset=utf-8'));
+  $('saveSections').addEventListener('click',()=>download(csv([['section','start_seconds','end_seconds','mean_quarter_note_BPM','intervals','basic_quarter_note_BPM','basic_tempo_status'],...analysis.sections.map((s,i)=>[i+1,s.start.toFixed(3),s.end.toFixed(3),s.bpm.toFixed(4),s.count,s.perceived?.bpm?.toFixed(4)||'',s.perceived?.status||'insufficient'])]),baseName()+'.sections.csv','text/csv;charset=utf-8'));
   $('saveSvg').addEventListener('click',()=>exportGraphic('svg'));$('savePng').addEventListener('click',()=>exportGraphic('png'));
   $('saveMix').addEventListener('click',()=>openAudioExport('mix'));$('saveClicks').addEventListener('click',()=>openAudioExport('clicks'));
   $('audioExportForm').addEventListener('submit',e=>{e.preventDefault();if($('audioExportForm').reportValidity())exportAudio();});

@@ -121,7 +121,8 @@ test('input is sanitized, sorted, deduplicated and never mutated; duplicate brea
 test('empty, single-beat and two-beat performances return usable stable output', () => {
   for (const input of [null, {}, [], [{time: 0}], [{time: 0}, {time: 0}]]) {
     const result = analyze(input);
-    assert.deepEqual(result.stats, {mean: null, start: null, end: null, min: null, max: null});
+    assert.deepEqual(result.stats, {mean: null, start: null, end: null, min: null, max: null,
+      perceived: {bpm:null,status:'insufficient',support:0}});
     assert.equal(result.sections.length, 0);
   }
   const result = analyze([{id: 'a', time: 3}, {id: 'b', time: 4.5}],
@@ -303,4 +304,82 @@ test('manual fermata runs split at gaps and suppressed possible fermatas stay su
  beats[15].expressionBefore='none';assert.ok(!analyze(beats).events.some(e=>e.type==='possible-fermata'));
  for(let i=10;i<=20;i++)beats[i].expressionBefore='fermata';beats[15].breakBefore=true;
  const events=analyze(beats).events.filter(e=>e.type==='fermata');assert.equal(events.length,2);assert.ok(events[0].end<events[1].start);
+});
+
+test('recurring base tempo stays at 66 through rubato, rallentandi and held notes while the exact mean falls',()=>{
+ const periods=[...Array(30).fill(60/66),...Array.from({length:12},(_,i)=>60/(66-21*i/11)),6,
+  ...Array(30).fill(60/66),...Array.from({length:40},(_,i)=>60/(66+4*Math.sin(i*Math.PI/10))),7,...Array(20).fill(60/66)];
+ const beats=beatsFromPeriods(periods);beats[43].fermataBefore=true;beats[114].expressionBefore='fermata';
+ const result=analyze(beats);
+ assert.equal(result.stats.perceived.status,'ok');near(result.stats.perceived.bpm,66,.1);
+ assert.ok(result.stats.mean>56&&result.stats.mean<60);
+ near(result.stats.mean,periods.length*60/periods.reduce((sum,p)=>sum+p,0));
+ assert.ok(result.stats.perceived.support>.8&&result.stats.perceived.support<=1);
+ assert.ok(result.sections.every(s=>s.perceived.status==='ok'));
+});
+
+test('recurring pulse does not systematically favor faster excursions and centers symmetric rubato',()=>{
+ for(const direction of [-1,1]){
+  const periods=Array.from({length:100},(_,i)=>60/(66*Math.exp(i%20>=15?direction*.2:0)));
+  const result=analyze(beatsFromPeriods(periods));
+  assert.equal(result.stats.perceived.status,'ok');near(result.stats.perceived.bpm,66,.1);
+  assert.ok(direction*(result.stats.mean-66)>0);
+ }
+ const cyclic=analyze(beatsFromPeriods(Array.from({length:160},(_,i)=>60/(66+5*Math.sin(i*Math.PI/10)))));
+ assert.equal(cyclic.stats.perceived.status,'ok');near(cyclic.stats.perceived.bpm,66,.3);
+});
+
+test('distinct sustained tempi have no invented global base, even when sections are manually merged',()=>{
+ const beats=beatsFromPeriods([...Array(40).fill(1),...Array(60).fill(2/3)]);
+ const result=analyze(beats),merged=analyze(beats,{},[]),arbitrary=analyze(beats,{},[5,15,35,45]);
+ assert.equal(result.stats.perceived.status,'variable');assert.equal(result.stats.perceived.bpm,null);
+ near(result.sections[0].perceived.bpm,60);near(result.sections[1].perceived.bpm,90);
+ assert.deepEqual(merged.stats.perceived,result.stats.perceived);
+ assert.deepEqual(arbitrary.stats.perceived,result.stats.perceived);
+ assert.equal(merged.sections[0].perceived.status,'variable');
+ const minorPlateau=analyze(beatsFromPeriods([...Array(160).fill(1),...Array(12).fill(2/3)]));
+ assert.equal(minorPlateau.stats.perceived.status,'variable','a short but sustained real second tempo is retained');
+});
+
+test('continuous expressive ramps and scattered multimodal tempi do not claim a fixed base',()=>{
+ for(const [from,to] of [[70,140],[140,70],[60,65],[65,60]]){
+  const result=analyze(beatsFromPeriods(Array.from({length:90},(_,i)=>60/(from+(to-from)*i/89))));
+  assert.equal(result.stats.perceived.status,'variable');assert.equal(result.stats.perceived.bpm,null);
+ }
+ const mixed=analyze(beatsFromPeriods(Array.from({length:160},(_,i)=>60/(i%16<8?82+3*Math.sin(i):137+4*Math.cos(i)))));
+ assert.equal(mixed.stats.perceived.status,'variable');assert.equal(mixed.stats.perceived.bpm,null);
+});
+
+test('base tempo is unavailable with too few usable beats or only held notes',()=>{
+ for(const beats of [[],constant(66,1),constant(66,7),constant(66,40).map((b,i)=>({...b,fermataBefore:i>0}))]){
+  const result=analyze(beats);
+  assert.deepEqual(result.stats.perceived,{bpm:null,status:'insufficient',support:0});
+ }
+ const result=analyze(constant(66,8));assert.equal(result.stats.perceived.status,'ok');near(result.stats.perceived.bpm,66);
+});
+
+test('missing coverage and beat-unit changes never distort recurring-pulse evidence',()=>{
+ const first=constant(66,20),second=constant(66,20,1000).map((b,i)=>({...b,id:'second-'+i,breakBefore:i===0}));
+ const result=analyze([...first,...second]),contiguous=analyze(constant(66,40));
+ near(result.stats.perceived.bpm,contiguous.stats.perceived.bpm);
+ near(result.stats.perceived.support,contiguous.stats.perceived.support);
+ const mixed=beatsFromPeriods([...Array(40).fill(1),...Array(50).fill(2/3)]);
+ for(const unit of [.25,.5,2,4,16]){
+  const scaled=analyze([...first,...second],{beatUnit:unit});
+  assert.equal(scaled.stats.perceived.status,result.stats.perceived.status);near(scaled.stats.perceived.bpm,66*unit);
+  near(scaled.stats.perceived.support,result.stats.perceived.support);
+  assert.equal(analyze(mixed,{beatUnit:unit}).stats.perceived.status,'variable');
+ }
+});
+
+test('isolated extra taps cannot hijack the base tempo and expressive overrides control its evidence',()=>{
+ const beats=constant(66,80);beats.push({id:'extra',time:beats[40].time+.01});
+ const result=analyze(beats);assert.ok(result.anomalies.length>0);
+ assert.equal(result.stats.perceived.status,'ok');near(result.stats.perceived.bpm,66);
+ const held=constant(66,40).map((b,i)=>({...b,expressionBefore:i>0?'fermata':undefined}));
+ assert.equal(analyze(held).stats.perceived.status,'insufficient');
+ const ramp=constant(66,40).map((b,i)=>({...b,expressionBefore:i>0?'accelerando':undefined}));
+ assert.equal(analyze(ramp).stats.perceived.status,'variable');
+ for(const beat of ramp)beat.expressionBefore='none';
+ assert.equal(analyze(ramp).stats.perceived.status,'ok');
 });

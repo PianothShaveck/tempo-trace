@@ -636,3 +636,53 @@ test('project validation rejects unsupported expression overrides and invalid tr
  assert.throws(()=>h.api.validateProject(project([],{beats:[{time:1,expressionBefore:'invalid'}]})));
  assert.equal(h.api.validateProject(project([1,2])).musicStart,0);
 });
+
+function tempoProject(periods, extra={}){
+ let time=0;const times=[0];for(const period of periods){time+=period;times.push(time);}
+ return project(times,{duration:Math.ceil(time)+1,...extra});
+}
+
+test('basic tempo remains separate from the lower exact average in the summary and section rows',()=>{
+ const data=tempoProject([...Array(30).fill(60/66),6,...Array(30).fill(60/66),6,...Array(20).fill(60/66)]);
+ data.beats[31].fermataBefore=true;data.beats[62].fermataBefore=true;
+ const h=boot();h.open(data);
+ assert.equal(h.$('statPerceived').textContent,'≈ 66');assert.equal(h.$('perceivedUnit').hidden,false);
+ assert.ok(h.api.analysis.stats.mean>56&&h.api.analysis.stats.mean<60);
+ assert.notEqual(h.$('statMean').textContent,h.$('statPerceived').textContent);
+ assert.match(h.$('statPerceived').parentElement.dataset.tip,/Estimated recurring pulse/);
+ const rows=h.$('sectionList').children;
+ assert.ok(rows.length>0);assert.ok(rows.every(row=>row.children[2].textContent==='≈ 66'));
+ assert.match(rows[0].getAttribute('aria-label'),/Basic tempo ≈ 66/);
+ h.$('chooseItalian').click();assert.match(h.$('statPerceived').parentElement.dataset.tip,/Stima della pulsazione ricorrente/);
+ assert.equal(h.$('statPerceived').textContent,'≈ 66');assert.match(h.$('sectionList').children[0].getAttribute('aria-label'),/Tempo di base ≈ 66/);
+});
+
+test('variable and insufficient basic tempo states are localized and never display a misleading BPM unit',()=>{
+ const h=boot();h.open(tempoProject([...Array(30).fill(1),...Array(30).fill(2/3)]));
+ assert.equal(h.$('statPerceived').textContent,'Variable');assert.equal(h.$('perceivedUnit').hidden,true);
+ assert.match(h.$('statPerceived').parentElement.dataset.tip,/No single basic tempo/);
+ assert.deepEqual(h.$('sectionList').children.map(row=>row.children[2].textContent),['≈ 60','≈ 90']);
+ h.$('chooseItalian').click();assert.equal(h.$('statPerceived').textContent,'Variabile');
+ assert.match(h.$('statPerceived').parentElement.dataset.tip,/Non emerge un unico tempo/);
+ h.open(project([0,1,2,3]));assert.equal(h.$('statPerceived').textContent,'—');assert.equal(h.$('perceivedUnit').hidden,true);
+ assert.match(h.$('statPerceived').parentElement.dataset.tip,/Beat stabili insufficienti/);
+ h.$('language').value='en';h.$('language').dispatch('change');assert.match(h.$('statPerceived').parentElement.dataset.tip,/Not enough stable beats/);
+ assert.equal(h.$('statPerceived').textContent,'—');assert.equal(h.$('perceivedUnit').hidden,true);
+});
+
+test('basic tempo follows the custom track start and is recomputed from the exported excerpt',async()=>{
+ let report;
+ const h=boot([],{TempoReport:{create(project,options){report={project,options};return {svg:'<svg/>',width:100,height:100};}}});
+ h.open(tempoProject([...Array(20).fill(.5),...Array(30).fill(60/66),...Array(30).fill(2/3)]));
+ const count=h.api.state.beats.length,endOf66=h.api.state.beats[50].time;
+ h.$('trackStartButton').click();h.$('trackStartTime').value=String(endOf66);h.$('trackStartForm').dispatch('submit');
+ assert.equal(h.$('statPerceived').textContent,'≈ 90');assert.equal(h.api.state.beats.length,count);
+ h.$('trackStartButton').click();h.$('trackStartTime').value='10';h.$('trackStartForm').dispatch('submit');
+ assert.equal(h.$('statPerceived').textContent,'Variable');assert.equal(h.api.analysis.intervals[0].start,10);
+ await h.api.exportGraphic('svg');assert.equal(report.options.start,10);assert.equal(report.project.analysis.stats.perceived.status,'variable');
+ assert.equal(report.project.beats[0].time,10);
+ h.api.setView(10,endOf66);h.$('exportScope').value='view';await h.api.exportGraphic('svg');
+ assert.equal(report.project.analysis.stats.perceived.status,'ok');assert.ok(Math.abs(report.project.analysis.stats.perceived.bpm-66)<.1);
+ assert.ok(report.project.analysis.sections.every(s=>Math.abs(s.perceived.bpm-66)<.1));
+ assert.equal(h.$('statPerceived').textContent,'Variable','exporting an excerpt does not replace the whole-track summary');
+});

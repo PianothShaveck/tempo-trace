@@ -12,8 +12,12 @@
  * Returns {intervals, sections, stats, anomalies, events}. Intervals have {index, start,
  * end, time, bpm, smoothed, anomaly, expressive, beatId, breakBefore}; time is the midpoint,
  * beatId is the ENDING tap's id, and breakBefore begins a continuous group.
- * Sections have {id, start, end, bpm, count}; count is the number of intervals.
- * stats: {mean, start, end, min, max}; empty values are null. mean and section
+ * Sections have {id, start, end, bpm, count, perceived}; count is the number of intervals.
+ * stats: {mean, start, end, min, max, perceived}; empty measured values are null.
+ * perceived: {bpm, status, support}; a robust recurring-pulse estimate, not a
+ * measured average or perceptual ground truth. status is ok, variable, or
+ * insufficient; only ok has a BPM. support is weighted nearby-beat share, not
+ * a calibrated confidence score. mean and section
  * bpm are exact tap-count / original-duration means, INCLUDING flagged taps and
  * held intervals. fermataBefore marks the interval ENDING at that tap as held.
  * expressive is null, 'accelerando', 'rallentando', 'fermata', or 'possible-fermata'.
@@ -347,6 +351,117 @@
     return result;
   }
 
+  // This is a typical recurring pulse, not a psychoacoustic measurement. Use
+  // equal beat weight (not duration weight) so a slow interval cannot dominate
+  // merely by lasting longer. The measured count/time mean stays independent.
+  // Log ratios make every threshold invariant under a change of beat unit.
+  function perceivedTempo(intervals) {
+    const empty = status => ({bpm: null, status, support: 0});
+    const samples = [];
+    let ordinary = 0, directionChanges = 0, previousDirection = null;
+    let previousValue = null, netChange = 0, variation = 0, moving = 0, pairs = 0;
+    for (const p of intervals) {
+      if (p.anomaly || isHold(p)) { previousValue = null; continue; }
+      const value = Math.log(p.bpm);
+      if (previousValue != null && !p.breakBefore) {
+        const step = value - previousValue;
+        netChange += step; variation += Math.abs(step); pairs++;
+        if (Math.abs(step) > .00015) moving++;
+      }
+      previousValue = value;
+      const ramp = isRamp(p);
+      if (!ramp) ordinary++;
+      else {
+        if (previousDirection && previousDirection !== p.expressive) directionChanges++;
+        previousDirection = p.expressive;
+      }
+      samples.push({value, weight: ramp ? .15 : 1});
+    }
+    if (samples.length < 8) return empty('insufficient');
+    // Even a modest continuous drift can fall below expressive-event detection.
+    // Require movement throughout most of the passage, not a final ritardando
+    // following an established pulse. Gaps never count as directional steps.
+    if (moving >= pairs * .7 && Math.abs(netChange) > Math.log(1.06) &&
+        Math.abs(netChange) > variation * .8) return empty('variable');
+    samples.sort((a, b) => a.value - b.value);
+    const total = samples.reduce((sum, p) => sum + p.weight, 0);
+    const quantile = (values, fraction) => {
+      const target = values.reduce((sum, p) => sum + p.weight, 0) * fraction;
+      let weight = 0;
+      for (let i = 0; i < values.length; i++) {
+        weight += values[i].weight;
+        if (weight + 1e-9 >= target) {
+          // Avoid favoring either direction when there are two central beats.
+          if (Math.abs(weight - target) < 1e-9 && i + 1 < values.length)
+            return (values[i].value + values[i + 1].value) / 2;
+          return values[i].value;
+        }
+      }
+      return values.at(-1).value;
+    };
+    let left = 0, mass = 0, bestMass = 0, bestFrom = 0, bestTo = 0;
+    const center = quantile(samples, .5), width = Math.log(1.12);
+    const spread = quantile(samples, .9) - quantile(samples, .1);
+    // Repeated narrow back-and-forth rubato has a recurring center, even when
+    // its expressive spans cover most beats. A one-way ramp has no base.
+    const recurringRubato = directionChanges >= 2 && spread <= Math.log(1.3);
+    if (ordinary < Math.max(8, samples.length * .25) && !recurringRubato) return empty('variable');
+    for (let right = 0; right < samples.length; right++) {
+      mass += samples[right].weight;
+      while (samples[right].value - samples[left].value > width) mass -= samples[left++].weight;
+      const mid = (samples[left].value + samples[right].value) / 2;
+      const bestMid = (samples[bestFrom].value + samples[bestTo].value) / 2;
+      if (mass > bestMass + 1e-9 || (Math.abs(mass - bestMass) < 1e-9 &&
+          Math.abs(mid - center) < Math.abs(bestMid - center))) {
+        bestMass = mass; bestFrom = left; bestTo = right;
+      }
+    }
+    const variable = () => ({bpm: null, status: 'variable', support: clamp(bestMass / total, 0, 1)});
+
+    // Look for genuinely sustained competing plateaus, independently of manual
+    // section boundaries. An eight-beat window must stay within 6%, with less
+    // than 1.5% drift between its two halves. Holds, ramps and gaps break it.
+    // A clear >5% hole between plateau clusters avoids labelling continuous
+    // ordinary rubato as several tempi merely because its extrema recur.
+    const stable = new Uint8Array(intervals.length);
+    let runStart = 0;
+    for (let i = 0; i < intervals.length; i++) {
+      const p = intervals[i];
+      if (p.breakBefore) runStart = i;
+      if (p.anomaly || isHold(p) || isRamp(p)) { runStart = i + 1; continue; }
+      if (i - runStart < 7) continue;
+      const logs = intervals.slice(i - 7, i + 1).map(item => Math.log(item.bpm));
+      if (Math.max(...logs) - Math.min(...logs) > Math.log(1.06) ||
+          Math.abs(median(logs.slice(0, 4)) - median(logs.slice(4))) > Math.log(1.015)) continue;
+      for (let j = i - 7; j <= i; j++) stable[j] = 1;
+    }
+    const plateaus = intervals.filter((p, i) => stable[i]).map(p =>
+      ({value: Math.log(p.bpm), duration: p.end - p.start})).sort((a, b) => a.value - b.value);
+    const centers = [];
+    let from = 0;
+    for (let to = 1; to <= plateaus.length; to++) {
+      if (to < plateaus.length && plateaus[to].value - plateaus[to - 1].value <= Math.log(1.05)) continue;
+      const cluster = plateaus.slice(from, to);
+      if (cluster.length >= 8 && cluster.reduce((sum, p) => sum + p.duration, 0) >= 4 - 1e-9)
+        centers.push(median(cluster.map(p => p.value)));
+      from = to;
+    }
+    if (centers.length > 1 && centers.at(-1) - centers[0] > Math.log(1.08)) return variable();
+
+    // Symmetric rubato keeps its center. A broader distribution needs a clear
+    // dominant recurring cluster; otherwise report that there is no single base
+    // instead of inventing an intermediate tempo between different sections.
+    let estimate = center;
+    if (spread > Math.log(1.3)) {
+      if (bestMass / total < .6) return variable();
+      estimate = quantile(samples.slice(bestFrom, bestTo + 1), .5);
+    }
+    const support = samples.reduce((sum, p) => sum +
+      (Math.abs(p.value - estimate) <= Math.log(1.08) + 1e-9 ? p.weight : 0), 0) / total;
+    if (support < .5) return variable();
+    return {bpm: Math.exp(estimate), status: 'ok', support: clamp(support, 0, 1)};
+  }
+
   function analyze(input, settings, sectionBoundaries=null) {
     const options = settings && typeof settings === 'object' ? settings : {};
     const unit = typeof options.beatUnit === 'number' && Number.isFinite(options.beatUnit) &&
@@ -379,7 +494,7 @@
     }
     if (current.length) groups.push(current);
     if (!intervals.length) return {intervals: [], sections: [],
-      stats: {mean: null, start: null, end: null, min: null, max: null}, anomalies: [], events: []};
+      stats: {mean: null, start: null, end: null, min: null, max: null, perceived: perceivedTempo([])}, anomalies: [], events: []};
     let sections = [];
     let events = [];
     for (const group of groups) {
@@ -410,7 +525,14 @@
     }
     sections.sort((a, b) => a.start - b.start);
     sections=Array.isArray(sectionBoundaries)?sectionsAtBoundaries(intervals,sectionBoundaries,unit):mergeAcrossGaps(sections,intervals,config,unit);
-    sections.forEach((section,i)=>{section.id='section-'+(i+1);});
+    let sectionFrom=0;
+    sections.forEach((section,i)=>{
+      section.id='section-'+(i+1);
+      let sectionTo=sectionFrom;
+      while(sectionTo<intervals.length&&intervals[sectionTo].end<=section.end+1e-9)sectionTo++;
+      section.perceived=perceivedTempo(intervals.slice(sectionFrom,sectionTo));
+      sectionFrom=sectionTo;
+    });
     let duration = 0;
     let min = Infinity;
     let max = -Infinity;
@@ -421,7 +543,7 @@
     }
     return {intervals, sections, stats: {
       mean: intervals.length * 60 * unit / duration,
-      start: edgeTempo(groups[0], true), end: edgeTempo(groups[groups.length - 1], false), min, max
+      start: edgeTempo(groups[0], true), end: edgeTempo(groups[groups.length - 1], false), min, max, perceived: perceivedTempo(intervals)
     }, anomalies: intervals.filter(interval => interval.anomaly), events: events.sort((a, b) => a.start - b.start)};
   }
 

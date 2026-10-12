@@ -7,9 +7,10 @@
   const language=options.language==='it'?'it':'en',t=(key,...values)=>I18n.translate(key,language,...values);
   const number=value=>Number.isFinite(value)?value.toLocaleString(language==='it'?'it-IT':'en-US',{maximumFractionDigits:1}):'—';
   const showBeats=options.showBeats===true;
+  const perceived=estimate=>Number.isFinite(estimate?.bpm)?'≈ '+number(Math.round(estimate.bpm)):estimate?.status==='variable'?t('Variabile'):'—';
   const colors={trend:'#088d7c',accelerando:'#b75b12',rallentando:'#515fbd',fermata:'#9467a4'};
   const analysis=project.analysis||{},stats=analysis.stats||{},sections=analysis.sections||[],intervals=analysis.intervals||[],beats=project.beats||[];
-  const width=1440,height=818+Math.max(1,Math.ceil(sections.length/3))*66,start=options.start||0,end=Math.max(start+.1,options.end||project.duration||30);
+  const width=1440,height=818+Math.max(1,Math.ceil(sections.length/3))*84,start=options.start||0,end=Math.max(start+.1,options.end||project.duration||30);
   const scale=options.scale||{min:0,max:Math.max(160,...intervals.map(p=>p.bpm))},min=scale.min,max=Math.max(min+1,scale.max);
   const left=94,right=1376,top=294,bottom=showBeats?618:652,plotWidth=right-left,plotHeight=bottom-top;
   const x=t=>left+(t-start)/(end-start)*plotWidth,y=bpm=>top+(max-bpm)/(max-min)*plotHeight;
@@ -22,8 +23,8 @@
   text(1376,70,time(start,end-start<10)+' — '+time(end,end-start<10),14,'#526475','text-anchor="end"');
   const title=String(project.title||t('Esecuzione'));text(64,117,title.length>81?title.slice(0,80)+'…':title,27,'#172d3b','font-weight="700"');
   text(64,148,t('{0} beat · BPM in semiminime',beats.length),13);
-  const cards=[['INIZIALE',number(stats.start)],['MEDIO',number(stats.mean)],['FINALE',number(stats.end)],['INTERVALLO',number(stats.min)+'–'+number(stats.max)]];
-  cards.forEach(([name,value],i)=>{const px=64+i*332;rect(px,175,316,88,i===1?'#e8f7f3':'#f3f6fa',10);text(px+18,200,t(name),11,'#526475','letter-spacing="1"');text(px+18,239,value,29,i===1?'#087c6e':'#172d3b','font-weight="700"');text(px+288,240,'BPM',11,'#526475','text-anchor="end"');});
+  const cards=[['TEMPO DI BASE',perceived(stats.perceived)],['MEDIO',number(stats.mean)],['INIZIALE',number(stats.start)],['FINALE',number(stats.end)],['INTERVALLO',number(stats.min)+'–'+number(stats.max)]];
+  cards.forEach(([name,value],i)=>{const px=64+i*265,cardWidth=252;rect(px,175,cardWidth,88,i===0?'#e8f7f3':'#f3f6fa',10);text(px+16,200,t(name),11,'#526475','letter-spacing="1"');text(px+16,239,value,i===4?24:i===0&&stats.perceived?.status==='variable'?23:29,i===0?'#087c6e':'#172d3b','font-weight="700"');if(i!==0||Number.isFinite(stats.perceived?.bpm))text(px+cardWidth-16,252,'BPM',10,'#526475','text-anchor="end"');});
   out.push(`<defs><clipPath id="reportPlot"><rect x="${left}" y="${top}" width="${plotWidth}" height="${plotHeight}"/></clipPath></defs>`);
   sections.forEach((s,i)=>{const a=Math.max(start,s.start),b=Math.min(end,s.end);if(b>a)rect(x(a),top,x(b)-x(a),plotHeight,i%2?'#f7f5fc':'#f2faf8');});
   for(let i=0;i<=5;i++){const v=min+(max-min)*i/5,py=y(v);out.push(`<path d="M${left} ${py}H${right}" stroke="#dce5ec" fill="none"/>`);text(left-14,py+5,number(v),12,'#526475','text-anchor="end"');}
@@ -79,7 +80,7 @@
   const clipped=intervals.filter(p=>{const value=showBeats?p.bpm:p.smoothed;return p.end>=start&&p.end<=end&&(value<min||value>max);}).length;
   if(clipped)text(1376,744,t('{0} valori fuori scala · statistiche complete',clipped),11,'#a76722','text-anchor="end"');
   text(64,751,t('SEZIONI'),12,'#172d3b','font-weight="700" letter-spacing="1"');
-  sections.forEach((s,i)=>{const px=64+(i%3)*444,py=770+Math.floor(i/3)*66,precise=s.end-s.start<10;rect(px,py,428,53,'#f3f6fa',7);text(px+14,py+22,String(i+1),13,'#0c8279','font-weight="700"');text(px+47,py+22,time(s.start,precise)+' — '+time(s.end,precise),13);text(px+408,py+33,number(s.bpm)+' BPM',19,'#172d3b','text-anchor="end" font-weight="700"');});
+  sections.forEach((s,i)=>{const px=64+(i%3)*444,py=770+Math.floor(i/3)*84,precise=s.end-s.start<10;rect(px,py,428,71,'#f3f6fa',7);text(px+14,py+20,String(i+1),12,'#0c8279','font-weight="700"');text(px+45,py+20,time(s.start,precise)+' — '+time(s.end,precise),12);text(px+14,py+48,t('Base'),10);text(px+67,py+50,perceived(s.perceived),s.perceived?.status==='variable'?13:18,'#087c6e','font-weight="700"');text(px+237,py+48,t('Medio'),10);text(px+410,py+50,number(s.bpm)+' BPM',18,'#172d3b','text-anchor="end" font-weight="700"');});
   if(!sections.length)text(64,779,'—',14);
   out.push('</g></svg>');return {svg:out.join(''),width,height};
  }

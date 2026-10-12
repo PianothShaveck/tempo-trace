@@ -117,3 +117,36 @@ test('report never connects the trend across a gap',()=>{
  const segments=[...path.matchAll(/M([\d.-]+) ([\d.-]+)L([\d.-]+) ([\d.-]+)/g)];assert.equal(segments.length,4);
  assert.ok(segments.every(m=>Number(m[3])-Number(m[1])<100));
 });
+
+function tempoReportProject(periods){
+ let time=0;const beats=[{id:'0',time}];for(const period of periods){time+=period;beats.push({id:String(beats.length),time});}
+ return {title:'Reference tempo',duration:time,beats,analysis:Analysis.analyze(beats)};
+}
+function summaryCard(svg,label){
+ const start=svg.indexOf('>'+label+'</text>');assert.ok(start>=0,'summary card '+label+' exists');
+ return svg.slice(start,svg.indexOf('<rect ',start));
+}
+
+test('report shows approximate basic tempo beside the lower exact average, globally and per section in both languages',()=>{
+ const data=tempoReportProject([...Array(30).fill(60/66),6,...Array(30).fill(60/66),6,...Array(20).fill(60/66)]);
+ data.beats[31].fermataBefore=true;data.beats[62].fermataBefore=true;data.analysis=Analysis.analyze(data.beats);
+ for(const [language,label,mean,average] of [['en','BASIC TEMPO','AVERAGE','58.1'],['it','TEMPO DI BASE','MEDIO','58,1']]){
+  const svg=Report.create(data,{language}).svg,base=summaryCard(svg,label);
+  assert.match(base,/>≈ 66<\/text>/);assert.match(base,/>BPM<\/text>/);
+  assert.ok(summaryCard(svg,mean).includes('>'+average+'</text>'));
+  assert.ok((svg.match(/>≈ 66<\/text>/g)||[]).length>=2,'section also displays its own basic tempo');
+  assert.ok(svg.includes('>'+average+' BPM</text>'),'section retains its exact mean');
+  assert.ok(!/NaN|Infinity/.test(svg));
+ }
+});
+
+test('report localizes variable and insufficient basic tempo without attaching BPM to either status',()=>{
+ const variable=tempoReportProject([...Array(30).fill(1),...Array(30).fill(2/3)]),insufficient=tempoReportProject([1,1,1]);
+ for(const [language,label,status] of [['en','BASIC TEMPO','Variable'],['it','TEMPO DI BASE','Variabile']]){
+  const svg=Report.create(variable,{language}).svg,card=summaryCard(svg,label);
+  assert.ok(card.includes('>'+status+'</text>'));assert.ok(!card.includes('>BPM</text>'));
+  assert.ok(svg.includes('>≈ 60</text>'));assert.ok(svg.includes('>≈ 90</text>'),'distinct sections retain their supported tempos');
+  const sparse=summaryCard(Report.create(insufficient,{language}).svg,label);
+  assert.ok(sparse.includes('>—</text>'));assert.ok(!sparse.includes('>BPM</text>'));
+ }
+});

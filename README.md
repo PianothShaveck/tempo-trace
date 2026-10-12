@@ -31,6 +31,7 @@ All modules live in `assets/`.
 - `musicStart` defaults to zero. Earlier beats remain in the project but are excluded from analysis, detection, clicks and media/data exports. Times stay relative to the original recording.
 - `expressionBefore` optionally overrides the preceding interval: `fermata`, `accelerando`, `rallentando`, or `none` (suppress detection). Omit it for automatic analysis; keep legacy `fermataBefore` compatibility.
 - `sectionBoundaries`: `null` for automatic detection; seconds array for manual boundaries (`[]` means one section). Means exclude gaps.
+- `stats.perceived` and `section.perceived` estimate basic tempo from recurring beat intervals, excluding holds/anomalies and reducing ramp weight. Keep count/time averages unchanged. `variable` means no single supported base; `insufficient` means too few usable intervals. `support` is concentration, not confidence.
 - Fermatas, gaps and inferred beats are distinct. Missing onsets do not prove a fermata; the current detector may split sustained, regularly measured notes.
 - Heuristic support is not measured accuracy. Evaluation requires annotated beats; synthetic tests and the simulated DOM do not replace audio/browser checks.
 - Keep controls accessible, text minimal, and audio on the device.
