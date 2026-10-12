@@ -92,3 +92,50 @@ test('off-grid MIDI tempo anchors shape the curve without appearing as optional 
  p.beats[0].tempoAnchor=true;
  assert.equal((Report.create(p,{showBeats:true}).svg.match(/data-beat="true"/g)||[]).length,p.beats.length-2,'initial tempo-only anchor is silent too');
 });
+
+test('paginated reports default to four bars per row and sixteen per page without losing or repeating a bar',()=>{
+ const p=project([...Array(80).fill(.5),...Array(84).fill(1)]),pages=Report.createPages(p);
+ assert.deepEqual(Report.pagination(p),{barsPerRow:4,rowsPerPage:4,barCount:41,pageCount:3});
+ assert.deepEqual(pages.map(page=>[page.page,page.pageCount,page.firstBar,page.lastBar,page.barCount]),[[1,3,1,16,16],[2,3,17,32,16],[3,3,33,41,9]]);
+ const numbers=pages.flatMap(page=>[...page.svg.matchAll(/<g data-bar="([^"]+)"/g)].map(m=>Number(m[1])));
+ assert.deepEqual(numbers,p.timeline.bars.map(bar=>bar.number));
+ assert.ok(pages.every(page=>page.height<=1316));
+ assert.ok(pages.every(page=>Math.max(...[...page.svg.matchAll(/data-row="(\d+)"/g)].map(m=>Number(m[1])))<4));
+ assert.deepEqual(pages.map(page=>[...page.svg.match(/data-bpm-min="([^"]+)" data-bpm-max="([^"]+)"/)].slice(1)),Array(3).fill([...pages[0].svg.match(/data-bpm-min="([^"]+)" data-bpm-max="([^"]+)"/)].slice(1)));
+ pages.forEach((page,index)=>{assert.match(page.svg,new RegExp('>Page '+(index+1)+' / 3</text>'));assert.match(page.svg,/>BASIC TEMPO<\/text>/);assert.ok(!page.svg.includes('<circle'));});
+ assert.match(pages[1].svg,/>Bars 17 — 32<\/text>/);
+ assert.equal(Report.create(p).barCount,41,'legacy create still returns one complete report');
+});
+
+test('page barlines own each optional beat once, including pickup and meter changes',()=>{
+ const advanced={enabled:true,firstBar:17,pickup:1,meters:[{bar:17,numerator:3,denominator:1},{bar:19,numerator:11,denominator:8}]};
+ const p=project(Array(85).fill(.5),advanced),pages=Report.createPages(p,{barsPerRow:2,rowsPerPage:2,showBeats:true});
+ assert.ok(pages.length>2);
+ assert.equal(pages.reduce((count,page)=>count+(page.svg.match(/data-beat="true"/g)||[]).length,0),p.beats.length);
+ assert.match(pages[0].svg,/>Bars Pickup 16 — 19<\/text>/);
+ assert.match(pages[0].svg,/>3\/1<\/text>/);assert.match(pages[0].svg,/>11\/8<\/text>/);
+ assert.match(pages[1].svg,/>11\/8<\/text>/,'a continuing meter is printed again on each new page');
+ assert.equal(pages[1].start,pages[0].end);
+});
+
+test('paginated excerpts preserve partial bar means, expressions and recording gaps',()=>{
+ const p=project(Array(65).fill(.5),{enabled:true,firstBar:-5,pickup:0,meters:[{bar:-5,numerator:4,denominator:4}]});
+ p.beats[17].breakBefore=true;p.timeline=Musical.build(p.beats,p.advanced,1);p.analysis=Analysis.analyze(p.beats);
+ p.analysis.intervals[4].expressive='accelerando';p.analysis.intervals[24].expressive='rallentando';p.analysis.intervals[34].expressive='fermata';
+ const options={start:.75,end:29.25,barsPerRow:2,rowsPerPage:2,language:'it'},pages=Report.createPages(p,options);
+ assert.equal(pages.length,4);assert.equal(pages[0].firstBar,-5);assert.equal(pages.at(-1).lastBar,9);
+ assert.equal(pages[0].start,.75);assert.equal(pages.at(-1).end,29.25);
+ assert.match(pages[0].svg,/>Pagina 1 \/ 4<\/text>/);assert.match(barGroup(pages[0].svg,-5),/>120 BPM<\/text>/);assert.match(barGroup(pages[0].svg,-5),/>Parziale<\/text>/);
+ assert.ok(!barGroup(pages[1].svg,-1).includes('data-bar-average="true"'));
+ assert.match(pages[0].svg,/data-expression="accelerando"/);assert.match(pages[1].svg,/data-expression="rallentando"/);assert.match(pages[2].svg,/data-expression="fermata"/);
+ assert.ok(pages.every(page=>!/NaN|Infinity|undefined/.test(page.svg)));
+});
+
+test('layout inputs stay legible and empty reports remain one valid page',()=>{
+ const p=project(Array(192).fill(.5));
+ assert.deepEqual(Report.pagination(p,{barsPerRow:100,rowsPerPage:100}),{barsPerRow:8,rowsPerPage:6,barCount:48,pageCount:1});
+ assert.deepEqual(Report.pagination(p,{barsPerRow:0,rowsPerPage:-1}),{barsPerRow:4,rowsPerPage:4,barCount:48,pageCount:3});
+ const pages=Report.createPages({beats:[]},{language:'it'});
+ assert.equal(pages.length,1);assert.equal(pages[0].barCount,0);assert.equal(pages[0].firstBar,null);assert.equal(pages[0].lastBar,null);
+ assert.match(pages[0].svg,/>Nessuna battuta misurata<\/text>/);
+});

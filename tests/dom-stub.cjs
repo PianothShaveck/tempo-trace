@@ -8,19 +8,22 @@ class Element {
     this.id = attrs.id || ''; this.dataset = {}; this.style = {}; this.children = [];
     this.listeners = new Map(); this.parentElement = null; this.textContent = '';
     this.className = attrs.class || ''; this.value = attrs.value || '';
+    this.type = attrs.type || (this.tagName === 'INPUT' ? 'text' : this.tagName === 'BUTTON' ? 'submit' : '');
     this.hidden = 'hidden' in attrs; this.disabled = 'disabled' in attrs;
     this.checked = 'checked' in attrs; this.open = false;
     this.currentTime = 0; this.paused = true; this.playbackRate = 1; this.readyState = 1;
     for (const [key, value] of Object.entries(attrs)) if (key.startsWith('data-')) this.dataset[key.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
     this.classList = {
       add: name => {this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), name])].join(' ');},
-      remove: name => {this.className = this.className.split(/\s+/).filter(c => c !== name).join(' ');}
+      remove: name => {this.className = this.className.split(/\s+/).filter(c => c !== name).join(' ');},
+      contains: name => this.className.split(/\s+/).includes(name),
+      toggle: (name, force) => {const add = force ?? !this.classList.contains(name);this.classList[add ? 'add' : 'remove'](name);return add;}
     };
   }
-  addEventListener(type, callback) {if (!this.listeners.has(type)) this.listeners.set(type, []); this.listeners.get(type).push(callback);}
+  addEventListener(type, callback, options = false) {if (!this.listeners.has(type)) this.listeners.set(type, []); this.listeners.get(type).push({callback,capture:options===true||!!options.capture});}
   dispatch(type, overrides = {}) {
-    const event = {type, target: this, defaultPrevented: false, preventDefault() {this.defaultPrevented = true;}, ...overrides};
-    const results = (this.listeners.get(type) || []).map(fn => fn(event));
+    const event = {type, target: this, defaultPrevented: false, propagationStopped: false, preventDefault() {this.defaultPrevented = true;}, stopPropagation() {this.propagationStopped = true;}, ...overrides};
+    const results = [...(this.listeners.get(type) || [])].sort((a,b)=>Number(b.capture)-Number(a.capture)).map(listener => listener.callback(event));
     return {event, results};
   }
   append(...nodes) {for (const node of nodes) {node.parentElement = this; this.children.push(node);}}

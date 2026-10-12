@@ -129,10 +129,10 @@
       const rect = svg.getBoundingClientRect();
       const width = Math.max(waveform ? 120 : 320, Math.round(rect.width || svg.clientWidth || 1100));
       lastWidth = Math.round(rect.width);
-      const height = waveform ? Math.max(56, Math.round(rect.height || 112)) : (width < 560 ? 350 : 420);
-      if(!waveform)svg.style.height=height+'px';
       const hasBars=!waveform&&Array.isArray(state.timeline?.bars)&&state.timeline.bars.length>0;
-      const barOffset=hasBars?26:0;
+      const barOffset=hasBars?48:0;
+      const height = waveform ? Math.max(56, Math.round(rect.height || 112)) : (width < 560 ? 350 : 420)+barOffset;
+      if(!waveform)svg.style.height=height+'px';
       const left = waveform ? 14 : 49, right = 18, top = waveform ? 9 : 34+barOffset, bottom = waveform ? 23 : 90;
       const start = Math.max(0, Number(state.viewStart) || 0);
       const end = Math.max(start + .05, Number(state.viewEnd) || Number(state.duration) || 30);
@@ -150,6 +150,9 @@
       if(!waveform&&callbacks.onScale)callbacks.onScale(scale);
       svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio','xMidYMid meet');
+      // An image role hides descendant controls from assistive technology.
+      // In advanced mode the ruler is a group of actual keyboard controls.
+      svg.setAttribute('role',hasBars?'group':'img');
       svg.replaceChildren();
       svg.append(node('title',{id:titleId},waveform ? t('Forma d’onda e posizione di ascolto') : t('Andamento dei BPM nel tempo')));
       svg.append(node('desc',{id:descriptionId},waveform ? t('Clicca sulla traccia per spostare la riproduzione. Questa traccia non modifica i beat.') : t('BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. I cerchi vuoti viola indicano beat automatici da rivedere. La riga Beat rende visibili tutte le posizioni. I quadrati di ripresa usano il BPM del beat successivo. Trascina lo sfondo per spostare la vista orizzontalmente e verticalmente. Seleziona un beat, poi trascinalo per correggerlo. Se i punti sono ravvicinati, il clic li ingrandisce. Le correzioni sono disponibili anche nei controlli numerici.')));
@@ -210,10 +213,30 @@
     function barDescription(bar){
       return t(bar.pickup?'Levare · battuta {0} · {1}/{2}':'Battuta {0} · {1}/{2}',bar.number,bar.numerator,bar.denominator);
     }
+    function selectBar(bar,keyboard){
+      callbacks.onSelectBar?.(bar.number);
+      if(keyboard)svg.querySelector(`g[data-bar-target="${bar.number}"]`)?.focus({preventScroll:true});
+    }
+    function barRegionAt(x){
+      let low=0,high=barHoverRegions.length;
+      while(low<high){const middle=(low+high)>>>1;if(barHoverRegions[middle].left<=x)low=middle+1;else high=middle;}
+      const region=barHoverRegions[low-1];return region&&x<region.right?region:null;
+    }
+    function barKey(event,bar){
+      const keys=['Enter',' ','ArrowLeft','ArrowRight','Home','End'];
+      if(!keys.includes(event.key))return;
+      event.preventDefault();event.stopPropagation?.();
+      const bars=state.timeline.bars.filter(item=>finite(item.start)),index=bars.indexOf(bar);
+      const target=event.key==='Home'?bars[0]:event.key==='End'?bars.at(-1):event.key==='ArrowLeft'?bars[Math.max(0,index-1)]:event.key==='ArrowRight'?bars[Math.min(bars.length-1,index+1)]:bar;
+      if(target)selectBar(target,true);
+    }
     function drawBars(){
       const g=geometry,strip=node('g',{'data-bar-strip':'true'}),boundaries=node('g',{'data-bar-boundaries':'true','pointer-events':'none'});
-      strip.append(node('rect',{x:g.left,y:5,width:g.plotWidth,height:23,rx:4,fill:'#192735'}));
+      strip.append(node('rect',{x:g.left,y:5,width:g.plotWidth,height:45,rx:5,fill:'#192735'}));
       strip.append(label(g.left-8,21,'Batt.',{'text-anchor':'end','font-size':10}));
+      const meterQuarters=new Set((state.timeline.meterEvents||[]).map(event=>event.quarter)),meterMarks=[],labels=[];
+      const visible=state.timeline.bars.filter(bar=>finite(bar.start)&&Number(bar.start)<=g.end&&finite(bar.end)&&Number(bar.end)>g.start);
+      const selected=visible.find(bar=>String(bar.number)===String(state.selectedBar)),tabBar=selected||visible[0];
       let lastLine=-Infinity,lastLabelRight=-Infinity;
       for(const bar of state.timeline.bars){
         // Null timestamps mark boundaries inside an unmeasured gap. Never
@@ -222,18 +245,68 @@
         const start=Number(bar.start),hasEnd=finite(bar.end),end=hasEnd?Number(bar.end):start;
         if(end<g.start)continue;
         const px=g.x(start),a=Math.max(g.left,px),b=Math.min(g.width-g.right,g.x(end));
-        if(hasEnd&&b>a)barHoverRegions.push({left:a,right:b,bar});
-        if(start>=g.start&&px-lastLine>=22){
-          const line=node('line',{x1:px,x2:px,y1:g.top,y2:g.height-g.bottom,stroke:palette.teal,'stroke-opacity':.19,'stroke-width':1,'data-bar-boundary':bar.number});
+        const isSelected=String(bar.number)===String(state.selectedBar),meterChange=meterQuarters.has(bar.startQuarter);
+        if(hasEnd&&b>a){
+          barHoverRegions.push({left:a,right:b,bar});
+          // Dense bars are hit-tested in the shared ruler rather than creating
+          // tens of thousands of SVG buttons. Arrow navigation can still reach
+          // every bar, and the selected bar always gets its own focus target.
+          if(b-a>=24||isSelected||bar===tabBar){
+            const target=node('g',{class:'bar-target','data-bar-target':bar.number,role:'button',tabindex:bar===tabBar?0:-1,'aria-label':barDescription(bar),'aria-pressed':isSelected?'true':'false'});
+            target.append(node('rect',{x:a,y:5,width:b-a,height:45,fill:isSelected?palette.teal:'transparent','fill-opacity':isSelected?.15:1,stroke:isSelected?palette.teal:'none','stroke-width':1,'data-bar-hit':bar.number}));
+            target.append(node('title',null,barDescription(bar)));
+            target.addEventListener('pointerdown',event=>{if(event.button!==0)return;event.preventDefault();event.stopPropagation?.();selectBar(bar,false);});
+            // A screen reader can activate an SVG button with a synthetic click.
+            target.addEventListener('click',event=>{event.stopPropagation?.();if(!event.detail)selectBar(bar,true);});
+            target.addEventListener('keydown',event=>barKey(event,bar));
+            target.addEventListener('focus',()=>showTooltip((a+b)/2,45,barDescription(bar)));
+            target.addEventListener('blur',hideTooltip);strip.append(target);
+          }
+          if(isSelected)boundaries.append(node('rect',{x:a,y:g.top,width:b-a,height:g.plotHeight,fill:palette.teal,'fill-opacity':.055,'data-selected-bar':bar.number}));
+        }
+        if(start>=g.start&&(px-lastLine>=22||meterChange||isSelected)){
+          const line=node('line',{x1:px,x2:px,y1:g.top,y2:g.height-g.bottom,stroke:palette.teal,'stroke-opacity':meterChange?.6:isSelected?.45:.19,'stroke-width':meterChange?1.6:1,'stroke-dasharray':meterChange?'4 3':null,'data-bar-boundary':bar.number,'data-meter-change':meterChange?bar.number:null});
           boundaries.append(line);lastLine=px;
         }
+        if(meterChange&&start>=g.start&&start<=g.end)meterMarks.push({x:px,bar});
         if(!hasEnd||b<=a)continue;
         const text=bar.pickup?t('Levare')+' '+bar.number:String(bar.number),width=text.length*6.1+9;
-        let labelX=a+5;
+        let labelX=clamp(a+5,g.left+4,g.width-g.right-width-3);
+        if(isSelected){
+          const marker=label(labelX,21,text,{'font-size':10,'font-weight':700,fill:palette.teal,'data-bar-label':bar.number,'pointer-events':'none'});
+          marker.append(node('title',null,barDescription(bar)));labels.push(marker);lastLabelRight=labelX+Math.max(35,width);continue;
+        }
+        // Reserve room around a selected number, even when its actual bar is
+        // narrower than its label. That bar stays identifiable at any zoom.
+        if(selected){const selectedX=clamp(Math.max(g.left,g.x(selected.start))+5,g.left+4,g.width-g.right-String(selected.number).length*6.1-12),selectedWidth=(selected.pickup?t('Levare')+' '+selected.number:String(selected.number)).length*6.1+9;if(labelX+width>selectedX-8&&labelX<selectedX+selectedWidth+8)continue;}
         if(labelX<lastLabelRight+12){if(lastLabelRight+12+width<=b-3)labelX=lastLabelRight+12;else continue;}
         if(labelX+width>g.width-g.right-3)continue;
-        const marker=label(labelX,21,text,{'font-size':10,fill:bar.pickup?palette.teal:palette.text,'data-bar-label':bar.number});
-        marker.append(node('title',null,barDescription(bar)));strip.append(marker);lastLabelRight=labelX+Math.max(35,width);
+        const marker=label(labelX,21,text,{'font-size':10,fill:bar.pickup?palette.teal:palette.text,'data-bar-label':bar.number,'pointer-events':'none'});
+        marker.append(node('title',null,barDescription(bar)));labels.push(marker);lastLabelRight=labelX+Math.max(35,width);
+      }
+      strip.append(...labels);
+      let meterRight=-Infinity;
+      const firstVisible=visible[0];
+      if(firstVisible&&Number(firstVisible.start)<g.start){
+        const text=firstVisible.numerator+'/'+firstVisible.denominator,width=text.length*6.2+12;
+        if(!meterMarks.length||meterMarks[0].x>g.left+width+20){
+          const carry=label(g.left+5,40,text,{fill:palette.teal,'font-size':10,'data-meter-continuation':'true','pointer-events':'none'});
+          carry.append(node('title',null,barDescription(firstVisible)));strip.append(carry);meterRight=g.left+width;
+        }
+      }
+      for(const mark of meterMarks){
+        const text=mark.bar.numerator+'/'+mark.bar.denominator,width=text.length*6.2+12;
+        const marker=node('g',{'data-meter-marker':mark.bar.number,'pointer-events':'none'});
+        marker.append(node('path',{d:`M${mark.x},29l3,4 -3,4 -3,-4Z`,fill:palette.teal}));
+        marker.append(node('title',null,barDescription(mark.bar)));
+        // Meter boundaries themselves are never thinned; only overlapping
+        // labels are omitted. Hover/keyboard still exposes every exact meter.
+        const left=clamp(mark.x+5,g.left+4,g.width-g.right-width-3);
+        if(left>meterRight+8){
+          marker.append(node('rect',{x:left,y:28,width,height:17,rx:4,fill:'#253e42'}));
+          marker.append(label(left+width/2,40,text,{'text-anchor':'middle',fill:palette.teal,'font-size':10,'font-weight':600,'data-meter-label':mark.bar.number}));meterRight=left+width;
+        }
+        strip.append(marker);
       }
       svg.append(boundaries,strip);
     }
@@ -429,6 +502,10 @@
     function pointerDown(event) {
       if(!geometry || event.button!==0 || !Number(state.duration)) return;
       const point=localPoint(event);
+      if(!waveform&&geometry.hasBars&&point.y>=5&&point.y<=50){
+        const region=barRegionAt(point.x);
+        if(region){event.preventDefault();event.stopPropagation?.();selectBar(region.bar,false);}return;
+      }
       if(point.x<geometry.left || point.x>geometry.width-geometry.right || point.y<geometry.top-10 || point.y>(waveform?geometry.height-geometry.bottom+5:geometry.laneY+23)) return;
       const found=waveform?null:hit(point);
       if(found) {
@@ -471,10 +548,10 @@
         svg.style.cursor='ew-resize';
       } else {
         if(waveform){const time=clamp(geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start),0,Number(state.duration));svg.style.cursor='pointer';showTooltip(point.x,geometry.top,timeLabel(time,true));return;}
-        if(geometry.hasBars&&point.y>=5&&point.y<=28){
-          const region=barHoverRegions.find(item=>point.x>=item.left&&point.x<item.right);
-          svg.style.cursor='default';
-          if(region)showTooltip(point.x,23,barDescription(region.bar));else hideTooltip();
+        if(geometry.hasBars&&point.y>=5&&point.y<=50){
+          const region=barRegionAt(point.x);
+          svg.style.cursor=region?'pointer':'default';
+          if(region)showTooltip(point.x,45,barDescription(region.bar));else hideTooltip();
           return;
         }
         const found=hit(point);

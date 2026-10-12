@@ -18,7 +18,7 @@ Commit the generated URL changes. Hosting serves the repository root.
 - `app.js`: state, history, UI and project import/export.
 - `i18n.js`: English/Italian UI and report messages. Italian source keys also translate worker errors; language preferences stay outside project data.
 - `analysis.js`, `analysis-worker.js`: BPM, sections and expression.
-- `musical.js`, `bar-report.js`: musical positions, meter map, pickups and reports by bar.
+- `musical.js`, `bar-report.js`, `archive.js`: musical positions, meter map, pickups, paginated reports and ZIP packaging.
 - `midi.js`, `midi-audio.js`: SMF parsing/retiming and worker-based synthesized audition.
 - `beat-detection.js`, `detection-client.js`: spectral onsets, local periodicity, tracking, decoding and cancellation.
 - `charts.js`, `click-track.js`: SVG interaction and audition clicks.
@@ -40,6 +40,7 @@ All modules live in `assets/`.
 - Optional `beat.quarter` positions must be present on every beat and strictly increase. Analysis sums covered quarters; a musical timeline rebases its first active beat to quarter zero. `tempoAnchor` preserves off-grid MIDI tempo changes without adding click beats.
 - MIDI formats 0/1 retain tracks, note ticks, controllers and unrelated metadata when converted. Tempo replacement starts at the chosen MIDI quarter position; the last project tempo continues through the file. Undefined gaps cannot be exported as a tempo map.
 - SMF cannot represent every app meter or arbitrary bar numbering. Compatible pickups get a short initial MIDI measure; exact notation is also stored in a noncommercial `0x7D` sequencer-specific `TempoTrace:1:` JSON event. Format 2 is rejected; SMPTE supports playback/import, not tempo conversion. The synth is a piano-like timing preview, not a General MIDI soundfont renderer.
+- The advanced inspector edits the live meter map; keep selection and drafts local to the session. Validate each edit before checkpointing. Multi-page reports share one BPM scale and retain original bar numbers.
 - Keep controls accessible, text minimal, and audio on the device.
 
 ## References

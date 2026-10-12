@@ -8,10 +8,17 @@
  'use strict';
  const finite=Number.isFinite,clamp=(n,a,b)=>Math.min(b,Math.max(a,n));
  const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]));
- const words={en:{basic:'BASIC TEMPO',average:'AVERAGE',start:'START',end:'END',variable:'Variable',pickup:'Pickup',bar:'Bar',bars:'Bars',trend:'Trend',accelerando:'Accelerando',rallentando:'Rallentando',fermata:'Fermata',possible:'Possible fermata',mean:'Bar average',beats:'Beats',quarter:'BPM in quarter notes',partial:'Partial',empty:'No measured bars',description:'Tempo by bar. Bar widths are equal; positions within each bar follow musical time.',outside:'Values outside the BPM scale'},it:{basic:'TEMPO DI BASE',average:'MEDIO',start:'INIZIALE',end:'FINALE',variable:'Variabile',pickup:'Levare',bar:'Battuta',bars:'Battute',trend:'Tendenza',accelerando:'Accelerando',rallentando:'Rallentando',fermata:'Fermata',possible:'Possibile fermata',mean:'Media della battuta',beats:'Beat',quarter:'BPM in semiminime',partial:'Parziale',empty:'Nessuna battuta misurata',description:'Andamento del tempo per battuta. Le battute hanno uguale larghezza; le posizioni interne seguono il tempo musicale.',outside:'Valori fuori dalla scala BPM'}};
+ const words={en:{basic:'BASIC TEMPO',average:'AVERAGE',start:'START',end:'END',variable:'Variable',pickup:'Pickup',bar:'Bar',bars:'Bars',trend:'Trend',accelerando:'Accelerando',rallentando:'Rallentando',fermata:'Fermata',possible:'Possible fermata',mean:'Bar average',beats:'Beats',quarter:'BPM in quarter notes',partial:'Partial',empty:'No measured bars',description:'Tempo by bar. Bar widths are equal; positions within each bar follow musical time.',outside:'Values outside the BPM scale',page:'Page'},it:{basic:'TEMPO DI BASE',average:'MEDIO',start:'INIZIALE',end:'FINALE',variable:'Variabile',pickup:'Levare',bar:'Battuta',bars:'Battute',trend:'Tendenza',accelerando:'Accelerando',rallentando:'Rallentando',fermata:'Fermata',possible:'Possibile fermata',mean:'Media della battuta',beats:'Beat',quarter:'BPM in semiminime',partial:'Parziale',empty:'Nessuna battuta misurata',description:'Andamento del tempo per battuta. Le battute hanno uguale larghezza; le posizioni interne seguono il tempo musicale.',outside:'Valori fuori dalla scala BPM',page:'Pagina'}};
  const colors={trend:'#088d7c',accelerando:'#b75b12',rallentando:'#515fbd',fermata:'#9467a4',beats:'#8468bd'};
  const clock=value=>{const s=Math.max(0,Math.round((value||0)*10));return Math.floor(s/600)+':'+(s%600/10).toFixed(1).padStart(4,'0');};
- function create(project={},options={}){
+ // Report layout stays independent of beat density: at most eight bars share
+ // a row, and paginated exports default to four rows of four bars.
+ function layoutOptions(options={}){
+  const count=(value,fallback,max)=>finite(Number(value))&&Number(value)>0?clamp(Math.round(Number(value)),1,max):fallback;
+  return {barsPerRow:count(options.barsPerRow,4,8),rowsPerPage:count(options.rowsPerPage,4,6)};
+ }
+ function seek(items,value,key){let lo=0,hi=items.length;while(lo<hi){const mid=(lo+hi)>>>1;if(items[mid][key]<=value)lo=mid+1;else hi=mid;}return lo;}
+ function prepare(project={},options={}){
   const language=options.language==='it'?'it':'en',t=words[language];
   const number=value=>finite(value)?value.toLocaleString(language==='it'?'it-IT':'en-US',{maximumFractionDigits:1}):'—';
   const perceived=estimate=>finite(estimate?.bpm)?'≈ '+number(Math.round(estimate.bpm)):estimate?.status==='variable'?t.variable:'—';
@@ -31,34 +38,11 @@
   }
   const qStart=quarterBound(start,'start'),qEnd=quarterBound(end,'end');
   const bars=(timeline.bars||[]).filter(b=>finite(qStart)&&finite(qEnd)&&b.endQuarter>qStart+1e-8&&b.startQuarter<qEnd-1e-8);
-  const capacity=clamp(Math.round(Number(options.barsPerRow)||8),1,16),rowCount=Math.max(1,Math.ceil(bars.length/capacity));
-  const width=1440,left=98,right=1376,barWidth=(right-left)/capacity,firstTop=322,rowHeight=242,plotHeight=142;
-  const height=firstTop+rowCount*rowHeight+26,showBeats=options.showBeats===true,out=[];
+  const showBeats=options.showBeats===true;
   const values=intervals.filter(p=>p.end>=start&&p.start<=end).map(p=>showBeats?p.bpm:p.smoothed).filter(finite).sort((a,b)=>a-b);
   const lowest=values.length?values[0]:60,highest=values.length?values.at(-1):120,padding=Math.max(5,(highest-lowest)*.14);
   const min=finite(options.scale?.min)?options.scale.min:Math.max(0,Math.floor((lowest-padding)/5)*5);
   const max=Math.max(min+1,finite(options.scale?.max)?options.scale.max:Math.ceil((highest+padding)/5)*5);
-  const text=(x,y,value,size=14,fill='#526475',extra='')=>out.push(`<text x="${x}" y="${y}" font-size="${size}" fill="${fill}" ${extra}>${escape(value)}</text>`);
-  const rect=(x,y,w,h,fill,rx=0,extra='')=>out.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}" fill="${fill}" ${extra}/>`);
-  const line=(x1,y1,x2,y2,color,width=1,extra='')=>out.push(`<path d="M${x1} ${y1}L${x2} ${y2}" stroke="${color}" stroke-width="${width}" fill="none" ${extra}/>`);
-  const title=String(project.title||'Tempo Trace');
-  out.push(`<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img"><title>${escape(title)}</title><desc>${escape(t.description)}</desc><g font-family="DejaVu Sans,Arial,sans-serif">`);
-  rect(0,0,width,height,'#f3f6fa');rect(32,32,width-64,height-64,'white',18);
-  text(64,69,'TEMPO TRACE',14,'#0c8279','font-weight="700" letter-spacing="2"');
-  text(right,69,clock(start)+' — '+clock(end),13,'#526475','text-anchor="end"');
-  text(64,112,title.length>82?title.slice(0,81)+'…':title,26,'#172d3b','font-weight="700"');
-  text(64,139,t.quarter,12);
-  const cards=[[t.basic,perceived(stats.perceived),finite(stats.perceived?.bpm)],[t.average,number(stats.mean),finite(stats.mean)],[t.start,number(stats.start),finite(stats.start)],[t.end,number(stats.end),finite(stats.end)]];
-  cards.forEach(([label,value,unit],i)=>{const px=64+i*332;rect(px,159,316,78,i===0?'#e8f7f3':'#f3f6fa',9);text(px+15,182,label,10,'#526475','letter-spacing="1"');text(px+15,219,value,25,i===0?'#087c6e':'#172d3b','font-weight="700"');if(unit)text(px+298,220,'BPM',10,'#526475','text-anchor="end"');});
-  const present=new Set(intervals.filter(p=>p.end>=start&&p.start<=end).map(p=>p.expressive));
-  let legendX=64;
-  const legend=(label,color,advance,dash=false)=>{line(legendX,259,legendX+20,259,color,2.5,dash?'stroke-dasharray="4 3"':'');text(legendX+27,263,label,11,color);legendX+=advance;};
-  legend(t.trend,colors.trend,115);legend(t.mean,'#83929d',language==='it'?172:138,true);
-  if(present.has('accelerando'))legend(t.accelerando,colors.accelerando,151);
-  if(present.has('rallentando'))legend(t.rallentando,colors.rallentando,150);
-  if(present.has('fermata'))legend(t.fermata,colors.fermata,113);
-  if(present.has('possible-fermata'))legend(t.possible,colors.fermata,170,true);
-  if(showBeats)legend(t.beats,colors.beats,80);
   function quarterAt(time){
    const value=Musical.quarterAtTime(timeline,time);
    return finite(value)?value:null;
@@ -88,8 +72,44 @@
   const gaps=[];for(let i=1;i<anchors.length;i++)if(anchors[i].breakBefore)gaps.push({q1:anchors[i-1].quarter,q2:anchors[i].quarter});
   let clipped=0;
   for(const p of intervals){const value=showBeats?p.bpm:p.smoothed;if(p.end>=start&&p.end<=end&&finite(value)&&(value<min||value>max))clipped++;}
+  return {project,options,language,t,number,perceived,timeline,intervals,stats,start,end,qStart,qEnd,bars,min,max,showBeats,segments,holds,dots,gaps,clipped};
+ }
+ function render(context,bars,page=1,pageCount=1){
+  const {project,options,language,t,number,perceived,timeline,intervals,stats,start,end,qStart,qEnd,min,max,showBeats,segments,holds,dots,gaps,clipped}=context;
+  const capacity=layoutOptions(options).barsPerRow,rowCount=Math.max(1,Math.ceil(bars.length/capacity));
+  const width=1440,left=98,right=1376,barWidth=(right-left)/capacity,firstTop=322,rowHeight=242,plotHeight=142;
+  const height=firstTop+rowCount*rowHeight+26,out=[];
+  const pageStart=bars.length?Musical.timeAtQuarter(timeline,Math.max(qStart,bars[0].startQuarter)):start;
+  const lastBar=bars.at(-1),pageEnd=lastBar?Musical.timeAtQuarter(timeline,Math.min(qEnd,lastBar.measuredEndQuarter??lastBar.endQuarter)):end;
+  const text=(x,y,value,size=14,fill='#526475',extra='')=>out.push(`<text x="${x}" y="${y}" font-size="${size}" fill="${fill}" ${extra}>${escape(value)}</text>`);
+  const rect=(x,y,w,h,fill,rx=0,extra='')=>out.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}" fill="${fill}" ${extra}/>`);
+  const line=(x1,y1,x2,y2,color,width=1,extra='')=>out.push(`<path d="M${x1} ${y1}L${x2} ${y2}" stroke="${color}" stroke-width="${width}" fill="none" ${extra}/>`);
+  const title=String(project.title||'Tempo Trace');
+  out.push(`<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" data-page="${page}" data-page-count="${pageCount}" data-bpm-min="${min}" data-bpm-max="${max}"><title>${escape(title)}</title><desc>${escape(t.description)}</desc><g font-family="DejaVu Sans,Arial,sans-serif">`);
+  rect(0,0,width,height,'#f3f6fa');rect(32,32,width-64,height-64,'white',18);
+  text(64,69,'TEMPO TRACE',14,'#0c8279','font-weight="700" letter-spacing="2"');
+  text(right,69,t.page+' '+page+' / '+pageCount,13,'#526475','text-anchor="end"');
+  text(64,112,title.length>55?title.slice(0,54)+'…':title,26,'#172d3b','font-weight="700"');
+  text(64,139,t.quarter,12);
+  const barSpan=bars.length?(bars[0].pickup?t.pickup+' '+bars[0].number:String(bars[0].number))+(bars.length>1?' — '+bars.at(-1).number:''):'—';
+  const pageTime=[pageStart,pageEnd].map(value=>finite(value)?clock(value):'—').join(' — ');
+  text(right,112,t.bars+' '+barSpan,16,'#172d3b','text-anchor="end" font-weight="700"');
+  text(right,139,pageTime,12,'#526475','text-anchor="end"');
+  const cards=[[t.basic,perceived(stats.perceived),finite(stats.perceived?.bpm)],[t.average,number(stats.mean),finite(stats.mean)],[t.start,number(stats.start),finite(stats.start)],[t.end,number(stats.end),finite(stats.end)]];
+  cards.forEach(([label,value,unit],i)=>{const px=64+i*332;rect(px,159,316,78,i===0?'#e8f7f3':'#f3f6fa',9);text(px+15,182,label,10,'#526475','letter-spacing="1"');text(px+15,219,value,25,i===0?'#087c6e':'#172d3b','font-weight="700"');if(unit)text(px+298,220,'BPM',10,'#526475','text-anchor="end"');});
+  const present=new Set(intervals.filter(p=>p.end>=start&&p.start<=end).map(p=>p.expressive));
+  let legendX=64;
+  const legend=(label,color,advance,dash=false)=>{line(legendX,259,legendX+20,259,color,2.5,dash?'stroke-dasharray="4 3"':'');text(legendX+27,263,label,11,color);legendX+=advance;};
+  legend(t.trend,colors.trend,115);legend(t.mean,'#83929d',language==='it'?172:138,true);
+  if(present.has('accelerando'))legend(t.accelerando,colors.accelerando,151);
+  if(present.has('rallentando'))legend(t.rallentando,colors.rallentando,150);
+  if(present.has('fermata'))legend(t.fermata,colors.fermata,113);
+  if(present.has('possible-fermata'))legend(t.possible,colors.fermata,170,true);
+  if(showBeats)legend(t.beats,colors.beats,80);
   if(clipped)text(right,288,t.outside+': '+clipped,10,'#a76722','text-anchor="end"');
-  let previousMeter=null,segmentCursor=0,holdCursor=0,dotCursor=0,gapCursor=0;
+  let previousMeter=null;
+  const firstQuarter=bars.length?Math.max(bars[0].startQuarter,qStart):qStart;
+  let segmentCursor=seek(segments,firstQuarter,'q2'),holdCursor=seek(holds,firstQuarter,'q2'),dotCursor=seek(dots,firstQuarter-1e-8,'q'),gapCursor=seek(gaps,firstQuarter,'q2');
   bars.forEach((bar,index)=>{
    const row=Math.floor(index/capacity),column=index%capacity,top=firstTop+row*rowHeight,bottom=top+plotHeight,px=left+column*barWidth;
    const y=bpm=>top+(max-bpm)/(max-min)*plotHeight;
@@ -109,7 +129,7 @@
    line(px,top,px,bottom,'#c9d5dd',1.1);line(px+barWidth,top,px+barWidth,bottom,'#c9d5dd',1.1);
    const meter=bar.numerator+'/'+bar.denominator,meterChanged=previousMeter!==meter;
    const barLabel=(bar.pickup?t.pickup+' · ':'')+String(bar.number);
-   text(px+9,top-22,barLabel,barWidth<130?10:13,'#172d3b','font-weight="700"');
+   text(px+9,top-22,barLabel,barWidth<170?12:15,'#172d3b','font-weight="700"');
    if(meterChanged||column===0)text(px+9,top-6,meter,10,meterChanged?'#087c6e':'#70808d',meterChanged?'font-weight="700"':'');
    previousMeter=meter;
    const partial=bar.complete===false||clipStart>q0+.00001||clipEnd<q1-.00001;
@@ -130,7 +150,7 @@
     while(dotCursor<dots.length&&dots[dotCursor].q<clipStart-1e-8)dotCursor++;
     for(let k=dotCursor;k<dots.length&&dots[k].q<=clipEnd+1e-8;k++){const p=dots[k],q=p.q;
      // A shared barline owns its marker on the right, except the final bar.
-     if(q>=q1-1e-8&&index<bars.length-1&&Math.abs(bars[index+1].startQuarter-q)<1e-8)continue;
+     if(q>=q1-1e-8&&q<qEnd-1e-8)continue;
      const cx=x(q),cy=clamp(y(p.bpm),top+4,bottom-4),key=Math.round(cx)+','+Math.round(cy);if(pixels.has(key))continue;pixels.add(key);
      const color=p.anomaly?'#b47a29':p.expressive==='fermata'||p.expressive==='possible-fermata'?colors.fermata:colors.beats;
      out.push(`<circle data-beat="true" cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="2.4" fill="${color}"><title>${escape(number(p.bpm)+' BPM · '+clock(p.end))}</title></circle>`);
@@ -140,7 +160,19 @@
   });
   if(!bars.length)text(64,firstTop+40,t.empty,16);
   out.push('</g></svg>');
-  return {svg:out.join(''),width,height};
+  return {svg:out.join(''),width,height,page,pageCount,firstBar:bars[0]?.number??null,lastBar:lastBar?.number??null,barCount:bars.length,start:pageStart,end:pageEnd};
  }
- return {create};
+ // create keeps the original single-image contract for existing integrations.
+ function create(project={},options={}){const context=prepare(project,options);return render(context,context.bars);}
+ function pagination(project={},options={}){
+  const context=prepare(project,options),layout=layoutOptions(options);
+  return {...layout,barCount:context.bars.length,pageCount:Math.max(1,Math.ceil(context.bars.length/(layout.barsPerRow*layout.rowsPerPage)))};
+ }
+ function createPages(project={},options={}){
+  const context=prepare(project,options),layout=layoutOptions(options),pageSize=layout.barsPerRow*layout.rowsPerPage;
+  const pageCount=Math.max(1,Math.ceil(context.bars.length/pageSize)),pages=[];
+  for(let page=0;page<pageCount;page++)pages.push(render(context,context.bars.slice(page*pageSize,(page+1)*pageSize),page+1,pageCount));
+  return pages;
+ }
+ return {create,createPages,pagination};
 });

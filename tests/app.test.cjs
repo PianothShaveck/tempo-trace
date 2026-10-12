@@ -8,6 +8,8 @@ const {createDOM, Element} = require('./dom-stub.cjs');
 const TempoAnalysis = require('../assets/analysis.js');
 const TempoMusical = require('../assets/musical.js');
 const TempoMidi = require('../assets/midi.js');
+const TempoBarReport = require('../assets/bar-report.js');
+const TempoArchive = require('../assets/archive.js');
 
 const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, '../assets/app.js'), 'utf8');
@@ -21,8 +23,8 @@ function boot(storageEntries = [], overrides = {}) {
   const document = createDOM(html), window = new Element('window'), storage = new Map(storageEntries);
   let nextId = 0, taskId = 0;
   const charts = [];
-  const createChart = (svg, callbacks) => {const chart = {render(data) {this.latest = data;callbacks?.onScale?.({...this.getScale(),clipped:0});}, getScale(){return this.latest?.yRange||{min:80,max:120};}, setPlayhead(time) {this.time = time;}, exportSVG() {return '<svg/>';}}; charts.push(chart); return chart;};
-  const context = vm.createContext({document, window, TempoAnalysis, TempoMusical, TempoMidi, File,
+  const createChart = (svg, callbacks) => {const chart = {callbacks,render(data) {this.latest = data;callbacks?.onScale?.({...this.getScale(),clipped:0});}, getScale(){return this.latest?.yRange||{min:80,max:120};}, setPlayhead(time) {this.time = time;}, exportSVG() {return '<svg/>';}}; charts.push(chart); return chart;};
+  const context = vm.createContext({document, window, TempoAnalysis, TempoMusical, TempoMidi, TempoBarReport, TempoArchive, File,
     TempoCharts: {createTempoChart: createChart, createWaveform: createChart,tempoScale:()=>({min:80,max:160})},
     crypto: {randomUUID: () => 'generated-' + ++nextId},
     localStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value)},
@@ -217,14 +219,50 @@ test('Space toggles playback, T taps once, and typing/native controls/dialogs re
   h.media.currentTime=2;
   h.press('KeyT',h.document.body,{repeat:true});
   h.press('KeyT',h.$('beatTime'));h.press('KeyT',h.$('speed'));
-  assert.equal(h.press('Space',h.$('playButton')).defaultPrevented,false);
-  assert.equal(h.press('Space',h.$('beatTime')).defaultPrevented,false);
-  h.$('helpDialog').showModal();h.press('KeyT');h.press('Space');h.$('helpDialog').close();
+  assert.equal(h.press('Space',h.$('playButton')).defaultPrevented,true);assert.equal(h.media.paused,false);
+  assert.equal(h.press('Space',h.$('beatTime')).defaultPrevented,true);assert.equal(h.media.paused,true);
+  h.$('helpDialog').showModal();h.press('KeyT');assert.equal(h.press('Space').defaultPrevented,true);assert.equal(h.media.paused,false);h.press('Space');h.$('helpDialog').close();
   assert.equal(h.api.state.beats.length,1);assert.equal(h.media.paused,true);
   h.press('KeyP');assert.equal(h.media.paused,true);
   h.press('KeyT',h.$('tempoChart'));assert.equal(h.api.state.beats.length,2);
   h.press('KeyZ',h.document.body,{ctrlKey:true});assert.equal(h.api.state.beats.length,1);
   h.press('KeyZ',h.document.body,{ctrlKey:true,shiftKey:true});assert.equal(h.api.state.beats.length,2);
+});
+
+test('Space always controls playback after numeric, checkbox, slider, selector and button interactions',()=>{
+ const h=boot();h.open(project([1,2,3],{advanced:advancedConfig()}));h.api.attachMedia();h.api.selectBeat('b1');h.$('offsetButton').click();
+ const summary=h.$('gridSettings').querySelector('summary');
+ const radio=h.document.createElement('input');radio.type='radio';h.$('workspace').append(radio);
+ const roleButton=h.document.createElement('div');roleButton.setAttribute('role','button');h.$('workspace').append(roleButton);
+ for(const control of [h.$('beatTime'),h.$('offsetMs'),h.$('meterNumerator'),h.$('showRaw'),h.$('clickAuto'),h.$('volume'),h.$('speed'),h.$('barView'),h.$('playButton'),h.$('saveMeterChange'),summary,radio,roleButton]){
+  h.media.pause();control.focus();const value=control.value,checked=control.checked;
+  const down=h.press('Space',control);assert.equal(down.defaultPrevented,true,control.id||control.tagName);assert.equal(down.propagationStopped,true);assert.equal(h.media.paused,false);assert.equal(h.document.activeElement,h.$('tempoChart'));
+  assert.equal(control.value,value);assert.equal(control.checked,checked);
+  const repeat=h.press('Space',h.document.activeElement,{repeat:true});assert.equal(repeat.defaultPrevented,true);assert.equal(h.media.paused,false,'holding Space must not repeatedly toggle');
+  const up=h.document.dispatch('keyup',{code:'Space',target:control}).event;assert.equal(up.defaultPrevented,true);assert.equal(up.propagationStopped,true);assert.equal(h.media.paused,false);
+  h.press('Space',h.$('tempoChart'));assert.equal(h.media.paused,true);h.document.dispatch('keyup',{code:'Space',target:h.$('tempoChart')});
+ }
+ assert.deepEqual(plain(h.api.state.beats.map(beat=>beat.time)),[1,2,3]);assert.equal(h.api.history.undo,0);
+});
+
+test('Space commits the native numeric blur before playback and cannot activate the old focused control on keyup',()=>{
+ const h=boot();h.open(project([1,2,3]));h.api.attachMedia();h.api.selectBeat('b1');const input=h.$('beatTime');input.focus();input.value='2.05';
+ // Model the browser change event emitted when a modified number loses focus.
+ const blur=input.blur.bind(input);input.blur=()=>{input.dispatch('change');blur();};
+ let heardPosition;h.media.addEventListener('play',()=>{heardPosition=h.api.state.beats[1].time;});
+ h.press('Space',input);assert.equal(heardPosition,2.05);assert.equal(h.api.history.undo,1);assert.equal(h.document.activeElement,h.$('tempoChart'));
+ assert.equal(h.document.dispatch('keyup',{code:'Space',target:input}).event.defaultPrevented,true);
+ assert.equal(h.document.dispatch('keyup',{code:'Space',target:input}).event.defaultPrevented,false,'keyup suppression clears after the matching key release');
+});
+
+test('Space preserves real text entry, composition and modified shortcuts while remaining available in dialogs',()=>{
+ const h=boot();assert.equal(h.press('Space').defaultPrevented,false);h.open(project([1,2,3]));h.api.attachMedia();
+ const controls=[['input','text'],['input','search'],['input','email'],['textarea'],['div','editable']].map(([tag,type])=>{const element=h.document.createElement(tag);if(type==='editable')element.setAttribute('contenteditable','true');else if(type)element.type=type;h.$('workspace').append(element);return element;});
+ for(const target of controls){target.focus();assert.equal(h.press('Space',target).defaultPrevented,false);assert.equal(h.media.paused,true);assert.equal(h.document.activeElement,target);}
+ for(const options of [{ctrlKey:true},{metaKey:true},{altKey:true},{isComposing:true}]){h.$('beatTime').focus();assert.equal(h.press('Space',h.$('beatTime'),options).defaultPrevented,false);assert.equal(h.media.paused,true);assert.equal(h.document.activeElement,h.$('beatTime'));}
+ h.$('settingsDialog').showModal();h.$('beatUnit').focus();assert.equal(h.press('Space',h.$('beatUnit')).defaultPrevented,true);assert.equal(h.media.paused,false);assert.equal(h.document.activeElement,h.$('settingsDialog'));assert.equal(h.$('settingsDialog').open,true);assert.equal(h.api.history.undo,0);
+ assert.equal(h.document.dispatch('keyup',{code:'Space',target:h.$('beatUnit')}).event.defaultPrevented,true);h.$('settingsDialog').close();
+ assert.equal(h.document.dispatch('keyup',{code:'Space',target:h.$('beatUnit')}).event.defaultPrevented,false);
 });
 
 test('invalid JSON imports leave the current session and history intact', async () => {
@@ -582,19 +620,31 @@ test('range and additive selection can be edited using custom offset with one un
 
 test('offset all keeps beat metadata and relative timing, follows section boundaries and survives reimport',()=>{
  const h=boot();h.open(project([1,1.5,2,2.5,3],{sectionBoundaries:[2],beats:[1,1.5,2,2.5,3].map((time,i)=>({id:'b'+i,time,source:'auto',confidence:.3,inferred:true,fermataBefore:i===2,breakBefore:i===4}))}));
- h.$('offsetButton').click();assert.equal(h.$('offsetScope').value,'all');h.$('offsetMs').value='37';h.$('offsetForm').dispatch('submit');
+ h.$('selectChartAll').click();h.$('offsetButton').click();assert.equal(h.$('offsetPanel').hidden,false);h.$('offsetMs').value='37';h.$('offsetForm').dispatch('submit');
  assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[1.037,1.537,2.037,2.537,3.037]);assert.deepEqual(plain(h.api.state.sectionBoundaries),[2.037]);
  assert.equal(h.api.state.beats[2].fermataBefore,true);assert.equal(h.api.state.beats[4].breakBefore,true);assert.equal(h.api.state.beats[1].confidence,.3);assert.equal(h.api.state.beats[1].source,'auto');
  const fresh=boot();fresh.open(plain(h.api.payload()));assert.deepEqual(plain(fresh.api.state.beats),plain(h.api.state.beats));
 });
 
-test('invalid bulk offsets are atomic: collision, reordering, boundaries, fractional input and invalid range',()=>{
+test('invalid bulk offsets are atomic: collision, reordering, boundaries and fractional input',()=>{
  const h=boot();h.open(project([0,.5,1,1.5,30]));h.api.selectBeat('b1');h.$('offsetButton').click();const original=plain(h.api.state.beats);
  for(const value of ['500','600','-501','1.5','']){h.$('offsetMs').value=value;h.$('offsetForm').dispatch('submit');assert.equal(h.$('offsetError').hidden,false);assert.deepEqual(plain(h.api.state.beats),original);assert.equal(h.api.history.undo,0);}
- h.$('offsetScope').value='all';h.$('offsetScope').dispatch('change');
+ h.$('selectChartAll').click();
  for(const value of ['-10','10']){h.$('offsetMs').value=value;h.$('offsetForm').dispatch('submit');assert.deepEqual(plain(h.api.state.beats),original);assert.equal(h.api.history.undo,0);}
- h.$('offsetScope').value='range';h.$('offsetScope').dispatch('change');h.$('offsetFrom').value='4';h.$('offsetTo').value='2';h.$('offsetForm').dispatch('submit');assert.deepEqual(plain(h.api.state.beats),original);
- h.$('offsetFrom').value='2';h.$('offsetTo').value='4';h.$('offsetMs').value='10';h.$('offsetForm').dispatch('submit');assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[0,.51,1.01,1.51,30]);
+ h.api.selectBeat('b1');h.api.selectBeat('b3',false,{extend:true});h.$('offsetMs').value='10';h.$('offsetForm').dispatch('submit');assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[0,.51,1.01,1.51,30]);
+});
+
+test('chart selection controls keep the offset beside the selected beats and never open a dialog',()=>{
+ const h=boot();h.open(project([0,.5,1,1.5,2,2.5],{musicStart:.5}));h.api.setView(1,2);
+ assert.equal(h.$('offsetButton').disabled,true);h.$('offsetButton').click();assert.equal(h.$('offsetPanel').hidden,true);
+ h.$('selectVisible').click();assert.deepEqual(plain(h.api.state.selection),['b2','b3','b4']);assert.match(h.$('selectionSummary').textContent,/3 selected/);
+ h.$('offsetButton').click();assert.equal(h.$('offsetPanel').hidden,false);assert.equal(h.$('offsetButton').getAttribute('aria-expanded'),'true');
+ assert.equal(h.document.querySelectorAll('dialog').some(node=>node.open),false);assert.equal(h.document.activeElement,h.$('offsetMs'));
+ h.$('offsetMs').value='10';h.$('offsetForm').dispatch('submit');assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[0,.5,1.01,1.51,2.01,2.5]);
+ assert.equal(h.$('offsetPanel').hidden,true);assert.equal(h.document.activeElement,h.$('tempoChart'));assert.equal(h.api.history.undo,1);
+ h.$('offsetButton').click();h.$('offsetForm').dispatch('keydown',{code:'Escape'});assert.equal(h.$('offsetPanel').hidden,true);assert.equal(h.api.history.undo,1);
+ h.$('selectChartAll').click();assert.deepEqual(plain(h.api.state.selection),['b1','b2','b3','b4','b5'],'all acts on the performance, not the excluded intro');
+ h.$('offsetButton').click();h.$('clearSelection').click();assert.equal(h.$('offsetPanel').hidden,true);assert.equal(h.$('offsetButton').disabled,true);assert.deepEqual(plain(h.api.state.selection),[]);
 });
 
 test('beat list supports checkboxes and selecting all across pages without requiring modifier keys',()=>{
@@ -703,12 +753,13 @@ test('large-file warning does not block detection or audio export',async()=>{
 });
 
 function inputValue(node,value){node.value=String(value);node.dispatch('input');}
-function meterRow(h,index,{bar,numerator,denominator}){
- const inputs=h.$('meterRows').children[index].querySelectorAll('input');
- for(const [i,value] of [[0,bar],[1,numerator],[2,denominator]])if(value!==undefined)inputValue(inputs[i],value);
+function saveMeter(h,{bar,numerator,denominator}){
+ for(const [id,value] of [['meterChangeBar',bar],['meterNumerator',numerator],['meterDenominator',denominator]])if(value!==undefined)inputValue(h.$(id),value);
+ h.$('meterChangeForm').dispatch('submit');
 }
+function selectBar(h,number){h.charts[0].callbacks.onSelectBar(number);}
 function advancedConfig(extra={}){return {enabled:true,firstBar:1,pickup:0,meters:[{bar:1,numerator:4,denominator:4}],...extra};}
-function enableAdvanced(h){h.api.openMeter();h.api.applyMeter();assert.equal(h.$('meterError').hidden,true);}
+function enableAdvanced(h){h.$('advancedButton').click();assert.equal(h.api.state.advanced.enabled,true);assert.equal(h.$('advancedPanel').hidden,false);}
 function midiFixture(name='performance.mid'){
  const anchors=[{quarter:0,time:0},{quarter:.25,time:.125}];
  for(let q=1;q<=20;q++)anchors.push({quarter:q,time:.125+(q-.25)});
@@ -722,52 +773,143 @@ function midiHarness(overrides={}){
  return {...h,calls};
 }
 
-test('advanced mode starts hidden and enables arbitrary meters, pickup and custom numbering atomically',()=>{
- const h=boot();h.open(project(Array.from({length:41},(_,i)=>i*.5)));
+test('advanced mode is a persistent workspace; meter, pickup and numbering edits survive mode changes and reimport',()=>{
+ const h=boot();h.open(project(Array.from({length:81},(_,i)=>i*.5),{duration:45}));
  assert.equal(h.api.state.advanced.enabled,false);assert.equal(h.$('advancedPanel').hidden,true);assert.equal(h.$('barExportOptions').hidden,true);
- h.$('advancedButton').click();assert.equal(h.$('meterDialog').open,true);assert.equal(h.api.state.advanced.enabled,false);
- inputValue(h.$('firstBar'),42);inputValue(h.$('pickupLength'),1);meterRow(h,0,{numerator:3,denominator:1});
- h.$('addMeter').click();meterRow(h,1,{bar:43,numerator:11,denominator:8});h.api.applyMeter();
- assert.equal(h.$('meterError').hidden,true);assert.equal(h.$('meterDialog').open,false);assert.equal(h.$('advancedPanel').hidden,false);
+ enableAdvanced(h);assert.equal(h.$('advancedToolbar').hidden,false);assert.equal(h.$('advancedButton').getAttribute('aria-pressed'),'true');
+ assert.equal(h.document.querySelectorAll('dialog').some(node=>node.open),false,'switching modes opens no dialog');
+ h.api.openMeter();assert.equal(h.$('gridSettings').open,true);
+ inputValue(h.$('firstBar'),42);inputValue(h.$('pickupLength'),1);h.api.applyMeter();
+ assert.equal(h.$('meterError').hidden,true);selectBar(h,42);saveMeter(h,{bar:42,numerator:3,denominator:1});
+ assert.equal(h.$('meterChangeError').hidden,true);selectBar(h,43);saveMeter(h,{bar:43,numerator:11,denominator:8});
+ assert.equal(h.$('meterChangeError').hidden,true);assert.equal(h.$('advancedPanel').hidden,false);
  assert.deepEqual(plain(h.api.state.advanced),advancedConfig({firstBar:42,pickup:1,meters:[{bar:42,numerator:3,denominator:1},{bar:43,numerator:11,denominator:8}]}));
  const bars=h.api.musicalTimeline.bars;
  assert.deepEqual(plain(bars.slice(0,3).map(b=>[b.number,b.startQuarter,b.endQuarter,b.numerator,b.denominator])),[[41,0,1,3,1],[42,1,13,3,1],[43,13,18.5,11,8]]);
- assert.equal(h.api.history.undo,1);
- h.api.undo();assert.equal(h.$('advancedPanel').hidden,true);h.api.redo();assert.equal(h.$('advancedPanel').hidden,false);
+ h.api.undo();assert.equal(h.api.state.advanced.meters.length,1);h.api.redo();assert.equal(h.api.state.advanced.meters.length,2);
  h.api.persist();const saved=JSON.parse(h.storage.get('tempo-trace.session.v1'));const reopened=boot();reopened.open(saved);
  assert.deepEqual(plain(reopened.api.state.advanced),plain(h.api.state.advanced));assert.deepEqual(plain(reopened.api.musicalTimeline.bars),plain(bars));
- h.$('advancedButton').click();assert.equal(h.api.state.advanced.enabled,false);assert.equal(h.$('barExportOptions').hidden,true);
- h.$('advancedButton').click();assert.equal(h.$('firstBar').value,'42','reenabling keeps meter settings');
+ h.$('basicButton').click();assert.equal(h.api.state.advanced.enabled,false);assert.equal(h.$('barExportOptions').hidden,true);assert.equal(h.$('advancedToolbar').hidden,true);
+ enableAdvanced(h);assert.equal(h.$('firstBar').value,'42','reenabling keeps meter settings');assert.deepEqual(plain(h.api.musicalTimeline.bars),plain(bars));
 });
 
-test('invalid meter edits and cancellation preserve the complete project and undo history',()=>{
- const h=boot();h.open(project([0,1,2,3,4]));const before=plain(h.api.snapshot());
- h.api.openMeter();meterRow(h,0,{numerator:3,denominator:1});inputValue(h.$('pickupLength'),12);h.api.applyMeter();
- assert.equal(h.$('meterError').hidden,false);assert.deepEqual(plain(h.api.snapshot()),before);assert.equal(h.api.history.undo,0);
- inputValue(h.$('pickupLength'),0);meterRow(h,0,{denominator:0});h.api.applyMeter();assert.equal(h.$('meterError').hidden,false);
- h.$('meterDialog').close();assert.deepEqual(plain(h.api.snapshot()),before);
+test('invalid persistent meter and grid edits preserve the complete project and undo history',()=>{
+ const h=boot();h.open(project([0,1,2,3,4]));enableAdvanced(h);saveMeter(h,{bar:1,numerator:3,denominator:1});
+ const before=plain(h.api.snapshot()),history=h.api.history.undo;
+ h.api.openMeter();inputValue(h.$('pickupLength'),12);h.api.applyMeter();
+ assert.equal(h.$('meterError').hidden,false);assert.deepEqual(plain(h.api.snapshot()),before);assert.equal(h.api.history.undo,history);
+ saveMeter(h,{denominator:0});assert.equal(h.$('meterChangeError').hidden,false);assert.deepEqual(plain(h.api.snapshot()),before);assert.equal(h.api.history.undo,history);
+ h.$('gridSettings').open=false;assert.deepEqual(plain(h.api.snapshot()),before);
 });
 
-test('bar counter follows playback and bar navigation seeks through pickup and meter changes',()=>{
+test('bar counter follows playback and navigation shows a useful group of bars through pickup and meter changes',()=>{
  const advanced=advancedConfig({firstBar:42,pickup:1,meters:[{bar:42,numerator:3,denominator:1},{bar:43,numerator:11,denominator:8}]});
- const h=boot();h.open(project(Array.from({length:41},(_,i)=>i*.5),{advanced}));h.api.attachMedia();
+ const h=boot();h.open(project(Array.from({length:121},(_,i)=>i*.5),{duration:65,advanced}));h.api.attachMedia();
  h.api.seekTo(0);assert.match(h.$('barCounter').textContent,/41.*3\/1/);
  h.api.seekTo(.5);assert.match(h.$('barCounter').textContent,/42.*3\/1/);
- h.$('goBar').value='43';h.$('goBarButton').click();assert.equal(h.media.currentTime,6.5);assert.equal(h.api.view.start,6.5);assert.equal(h.api.view.end,9.25);assert.equal(h.api.view.follow,false);
+ h.$('goBar').value='43';h.$('barNavigation').dispatch('submit');assert.equal(h.media.currentTime,6.5);assert.equal(h.api.view.start,6.5);assert.equal(h.api.view.end,17.5);assert.equal(h.api.view.follow,false);
  assert.match(h.$('barCounter').textContent,/43.*11\/8/);
+ h.$('nextBar').click();assert.equal(h.media.currentTime,9.25);h.$('previousBar').click();assert.equal(h.media.currentTime,6.5);
+ h.$('barView').value='8';h.$('barView').dispatch('change');assert.equal(h.api.view.start,6.5);assert.equal(h.api.view.end,28.5);
+ h.$('barView').value='all';h.$('barView').dispatch('change');assert.equal(h.api.view.start,0);assert.ok(h.api.view.end>=60);
  h.media.currentTime=9.3;h.media.paused=false;h.api.animatePlayback(100);assert.match(h.$('barCounter').textContent,/44.*11\/8/);
- h.$('goBar').value='999';h.$('goBarButton').click();assert.equal(h.media.currentTime,9.3);
+ h.$('goBar').value='999';h.$('barNavigation').dispatch('submit');assert.equal(h.media.currentTime,9.3);
 });
 
-test('advanced graphics select bar layout and row count while ordinary mode keeps its time report',async()=>{
- const calls=[],make=kind=>({create(data,options){calls.push({kind,data,options});return {svg:'<svg/>',width:1440,height:900};}});
+test('clicking a bar loads its meter inspector and repeated edits need no dialog',()=>{
+ const h=boot();h.open(project(Array.from({length:241},(_,i)=>i*.5),{duration:125,advanced:advancedConfig()}));
+ selectBar(h,5);assert.equal(h.$('meterChangeBar').value,'5');assert.equal(h.$('meterNumerator').value,'4');assert.equal(h.$('meterDenominator').value,'4');
+ saveMeter(h,{numerator:11,denominator:8});assert.equal(h.api.state.advanced.meters.length,2);assert.equal(h.$('advancedPanel').hidden,false);
+ selectBar(h,8);saveMeter(h,{numerator:3,denominator:1});assert.equal(h.api.state.advanced.meters.length,3);
+ assert.equal(h.document.querySelectorAll('dialog').some(node=>node.open),false);
+ const list=h.$('meterRows');assert.equal(list.children.length,3);list.children[1].click();assert.equal(h.$('meterChangeBar').value,'5');assert.equal(h.$('meterNumerator').value,'11');
+ assert.equal(h.$('removeMeterChange').disabled,false);h.$('removeMeterChange').click();assert.deepEqual(plain(h.api.state.advanced.meters.map(m=>m.bar)),[1,8]);
+ h.api.undo();assert.deepEqual(plain(h.api.state.advanced.meters.map(m=>m.bar)),[1,5,8]);
+ selectBar(h,1);assert.equal(h.$('removeMeterChange').disabled,true);
+});
+
+test('Add change creates a separate draft even when every measured bar already has a meter change',()=>{
+ const advanced=advancedConfig({meters:[{bar:1,numerator:4,denominator:4},{bar:2,numerator:3,denominator:4},{bar:3,numerator:2,denominator:4}]});
+ const h=boot();h.open(project(Array.from({length:10},(_,i)=>i*.5),{advanced}));selectBar(h,3);
+ h.$('addMeter').click();assert.equal(h.$('meterChangeBar').value,'4');assert.equal(h.$('meterChangeBar').disabled,false);assert.equal(h.$('meterNumerator').value,'2');
+ assert.equal(h.document.activeElement,h.$('meterNumerator'));assert.equal(h.$('removeMeterChange').disabled,true);assert.equal(h.api.history.undo,0);assert.deepEqual(plain(h.api.state.advanced),advanced);
+ assert.equal(h.document.querySelectorAll('dialog').some(node=>node.open),false);
+ saveMeter(h,{bar:100,numerator:11,denominator:8});assert.equal(h.$('meterChangeError').hidden,true);assert.equal(h.api.state.advanced.meters.length,4);
+ assert.deepEqual(plain(h.api.state.advanced.meters.slice(0,3)),advanced.meters);assert.deepEqual(plain(h.api.state.advanced.meters.at(-1)),{bar:100,numerator:11,denominator:8});
+ h.$('addMeter').click();assert.equal(h.$('meterChangeBar').value,'101');assert.equal(h.$('meterNumerator').value,'11');assert.equal(h.$('meterDenominator').value,'8');assert.equal(h.api.history.undo,1);
+ h.api.undo();assert.deepEqual(plain(h.api.state.advanced),advanced);
+});
+
+test('saving an offscreen measured meter change reveals it and redraw preserves focus in the changes list',()=>{
+ const h=boot();h.open(project(Array.from({length:241},(_,i)=>i*.5),{duration:125,advanced:advancedConfig()}));selectBar(h,1);assert.equal(h.api.view.start,0);assert.equal(h.api.view.end,8);
+ h.$('addMeter').click();saveMeter(h,{bar:20,numerator:7,denominator:8});const bar=h.api.musicalTimeline.bars.find(item=>item.number===20);
+ assert.equal(h.api.view.start,bar.start);assert.ok(h.api.view.end>bar.start);assert.equal(h.$('meterChangeBar').value,'20');
+ const oldRow=h.$('meterRows').children[1];oldRow.focus();h.$('meterRows').scrollTop=180;h.api.moveBeat('b2',1.01);
+ const newRow=h.$('meterRows').children[1];assert.notEqual(newRow,oldRow);assert.equal(h.document.activeElement,newRow);assert.equal(newRow.getAttribute('data-meter-bar'),'20');assert.equal(h.$('meterRows').scrollTop,180);
+});
+
+test('existing changes can be moved without silently replacing a different change',()=>{
+ const h=boot();h.open(project(Array.from({length:81},(_,i)=>i*.5),{duration:45,advanced:advancedConfig({meters:[{bar:1,numerator:4,denominator:4},{bar:3,numerator:3,denominator:4},{bar:6,numerator:7,denominator:8}]})}));
+ selectBar(h,3);saveMeter(h,{bar:4});assert.deepEqual(plain(h.api.state.advanced.meters.map(m=>m.bar)),[1,4,6]);
+ const before=plain(h.api.snapshot()),history=h.api.history.undo;
+ saveMeter(h,{bar:6,numerator:9});assert.equal(h.$('meterChangeError').hidden,false);assert.deepEqual(plain(h.api.snapshot()),before);assert.equal(h.api.history.undo,history);
+ selectBar(h,4);h.$('removeMeterChange').click();assert.deepEqual(plain(h.api.state.advanced.meters.map(m=>m.bar)),[1,6]);
+});
+
+test('unrelated chart edits preserve unfinished meter/grid input and position in a long changes list',()=>{
+ const meters=Array.from({length:50},(_,i)=>({bar:1+i*2,numerator:i%2?3:4,denominator:4}));
+ const h=boot();h.open(project(Array.from({length:801},(_,i)=>i*.5),{duration:405,advanced:advancedConfig({meters})}));
+ selectBar(h,51);h.$('meterRows').scrollTop=920;inputValue(h.$('meterNumerator'),11);inputValue(h.$('meterDenominator'),8);
+ inputValue(h.$('firstBar'),-3);inputValue(h.$('pickupLength'),1.5);
+ h.api.moveBeat('b2',1.01);
+ assert.equal(h.$('meterNumerator').value,'11');assert.equal(h.$('meterDenominator').value,'8');assert.equal(h.$('firstBar').value,'-3');assert.equal(h.$('pickupLength').value,'1.5');
+ assert.equal(h.$('meterRows').scrollTop,920);assert.equal(h.api.state.advanced.meters.length,50);assert.equal(h.api.state.advanced.firstBar,1);
+ h.$('meterRows').children[26].click();assert.equal(h.$('meterChangeBar').value,'53');assert.equal(h.$('meterNumerator').value,'4');assert.equal(h.$('meterRows').scrollTop,920);
+});
+
+test('opening another project clears stale meter drafts and selected bar from the previous workspace',()=>{
+ const h=boot();h.open(project(Array.from({length:101},(_,i)=>i*.5),{duration:55,advanced:advancedConfig()}));
+ selectBar(h,20);inputValue(h.$('meterNumerator'),11);inputValue(h.$('firstBar'),42);h.$('gridSettings').open=true;
+ const advanced=advancedConfig({firstBar:-4,meters:[{bar:-4,numerator:3,denominator:8}]});
+ h.open(project([0,.5,1,1.5,2,2.5],{advanced}));
+ assert.equal(h.$('firstBar').value,'-4');assert.equal(h.$('meterChangeBar').value,'-4');assert.equal(h.$('meterNumerator').value,'3');assert.equal(h.$('meterDenominator').value,'8');
+ assert.equal(h.$('goBar').value,'-4');assert.equal(h.api.history.undo,0);
+ h.$('meterChangeForm').dispatch('submit');assert.deepEqual(plain(h.api.state.advanced),advanced);assert.equal(h.api.history.undo,0);
+});
+
+test('advanced graphics select bar layout and page dimensions while ordinary mode keeps its time report',async()=>{
+ const calls=[],make=kind=>({pagination(){return {pageCount:1,barCount:4,barsPerRow:4,rowsPerPage:4};},create(data,options){calls.push({kind,data,options});return {svg:'<svg/>',width:1440,height:900};},createPages(data,options){calls.push({kind,data,options});return [{svg:'<svg/>',width:1440,height:900}];}});
  const h=boot([],{TempoReport:make('time'),TempoBarReport:make('bars')});h.open(project(Array.from({length:41},(_,i)=>i*.5)));
  h.$('exportLayout').value='bars';await h.api.exportGraphic('svg');assert.equal(calls.at(-1).kind,'time');
- enableAdvanced(h);h.$('barsPerRow').value='4';h.api.setView(5,12);h.$('exportScope').value='view';await h.api.exportGraphic('svg');
- const result=calls.at(-1);assert.equal(result.kind,'bars');assert.equal(result.options.barsPerRow,4);assert.equal(result.options.showBeats,false);assert.equal(result.options.start,5);assert.equal(result.options.end,12);
+ enableAdvanced(h);h.$('barsPerRow').value='4';h.$('rowsPerPage').value='3';h.api.setView(5,12);h.$('exportScope').value='view';await h.api.exportGraphic('svg');
+ const result=calls.at(-1);assert.equal(result.kind,'bars');assert.equal(result.options.barsPerRow,4);assert.equal(result.options.rowsPerPage,3);assert.equal(result.options.showBeats,false);assert.equal(result.options.start,5);assert.equal(result.options.end,12);
  assert.equal(result.data.timeline.anchors[0].time,0,'excerpt keeps the original bar origin');
  h.$('exportShowBeats').checked=true;await h.api.exportGraphic('svg');assert.equal(calls.at(-1).options.showBeats,true);
  h.$('exportLayout').value='time';await h.api.exportGraphic('svg');assert.equal(calls.at(-1).kind,'time');
+});
+
+test('long bar reports export one archive of numbered SVG pages with a clear page count',async()=>{
+ const archives=[],downloads=[];
+ const h=boot([],{TempoArchive:{async zip(entries){archives.push(entries);return new Blob(['archive']);}}});
+ const advanced=advancedConfig({firstBar:42,pickup:1,meters:[{bar:42,numerator:4,denominator:4}]});
+ h.open(project(Array.from({length:129},(_,i)=>i*.5),{duration:65,advanced}));h.api.captureDownloads((content,name,type)=>downloads.push({content,name,type}));
+ h.$('exportButton').click();assert.match(h.$('exportPageCount').textContent,/3/);
+ await h.api.exportGraphic('svg');assert.equal(archives.length,1);assert.equal(archives[0].length,3);assert.equal(downloads.length,1);
+ assert.match(downloads[0].name,/\.zip$/);assert.equal(downloads[0].type,'application/zip');
+ const names=archives[0].map(entry=>entry.name);assert.equal(new Set(names).size,3);assert.ok(names.every(name=>name.endsWith('.svg')));
+ assert.ok(archives[0].every(entry=>typeof entry.data==='string'&&entry.data.includes('<svg')));
+ assert.match(archives[0][0].data,/41/);assert.match(archives[0][2].data,/73/);assert.ok(archives[0].every(entry=>!entry.data.includes('data-beat="true"')));
+ h.$('rowsPerPage').value='6';h.$('rowsPerPage').dispatch('change');assert.match(h.$('exportPageCount').textContent,/2/);
+});
+
+test('paginated PNG exports rasterize each page and failed pages never produce a partial archive',async()=>{
+ const rasters=[],archives=[],downloads=[];let fail=false;
+ const pages=Array.from({length:3},(_,i)=>({svg:'<svg>'+i+'</svg>',width:1200,height:1400-i*200,page:i+1,pageCount:3}));
+ const h=boot([],{TempoBarReport:{createPages(){return pages;},pagination(){return {pageCount:3,barCount:33,barsPerRow:4,rowsPerPage:4};}},TempoArchive:{async zip(entries){archives.push(entries);return new Blob(['archive']);}},TempoExportClient:{async png(svg,width,height){rasters.push({svg,width,height});if(fail&&svg===pages[1].svg)throw new Error('Rasterization failed');return new Blob([svg],{type:'image/png'});}}});
+ h.open(project(Array.from({length:41},(_,i)=>i*.5),{advanced:advancedConfig()}));h.api.captureDownloads((content,name,type)=>downloads.push({content,name,type}));
+ await h.api.exportGraphic('png');assert.deepEqual(rasters,pages.map(({svg,width,height})=>({svg,width,height})));assert.equal(archives[0].length,3);assert.ok(archives[0].every(entry=>entry.name.endsWith('.png')&&entry.data instanceof Blob));
+ assert.equal(downloads.length,1);assert.match(downloads[0].name,/\.zip$/);assert.equal(h.$('savePng').disabled,false);assert.equal(h.$('saveSvg').disabled,false);
+ fail=true;await h.api.exportGraphic('png');assert.equal(downloads.length,1);assert.equal(archives.length,1);assert.equal(h.$('savePng').disabled,false);assert.equal(h.$('saveSvg').disabled,false);
 });
 
 test('explicit musical positions survive timing edits and interpolated taps, then reset only on deliberate beat-unit changes',()=>{

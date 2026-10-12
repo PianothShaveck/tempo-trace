@@ -6,8 +6,8 @@
   const STORAGE_KEY = 'tempo-trace.session.v1';
   const MAX_BEATS = 50000;
   const cloneAdvanced=value=>TempoMusical.validate(value||{});
-  let midiWarnings=[];
-  let musicalTimeline=null,musicalError='',meterDraft=[],meterDraftFirst=1,currentMidi=null,midiTarget=null,midiTargetGeneration=0,pendingMidi=null,midiRenderController=null,midiImportGeneration=0;
+  let midiWarnings=[],graphicExportRunning=false;
+  let musicalTimeline=null,musicalError='',selectedBar=null,editingMeterBar=null,meterDirty=false,gridDirty=false,currentMidi=null,midiTarget=null,midiTargetGeneration=0,pendingMidi=null,midiRenderController=null,midiImportGeneration=0;
   const DEFAULTS = {beatUnit: 1, sectionThreshold: .12, minSectionSeconds: 8, smoothing: 5};
   const media = $('media');
   let state = {advanced:cloneAdvanced(),beats: [], sectionBoundaries:null, options: {...DEFAULTS}, media: null, duration: 0, musicStart:0, selectedId: null, selection:[], selectionAnchor:null};
@@ -66,10 +66,12 @@
   function checkpoint() { undoStack.push(snapshot()); trimHistory(undoStack); redoStack = []; }
   function undo() {
     if (!undoStack.length) return;
+    meterDirty=gridDirty=false;
     redoStack.push(snapshot()); trimHistory(redoStack); Object.assign(state, undoStack.pop()); lastTapId = null; pendingBreak = false; changed();
   }
   function redo() {
     if (!redoStack.length) return;
+    meterDirty=gridDirty=false;
     undoStack.push(snapshot()); trimHistory(undoStack); Object.assign(state, redoStack.pop()); lastTapId = null; pendingBreak = false; changed();
   }
   function payload() {
@@ -125,9 +127,9 @@
   function activeBeats(){return state.beats.filter(b=>b.time>=(state.musicStart||0));}
   function currentTime() { return hasMedia && number(media.currentTime) ? media.currentTime : clock; }
   function extent() { return Math.max(state.duration || 0, state.beats.at(-1)?.time || 0, .1); }
-  function graphState() { return {timeline:musicalTimeline,beats: state.beats, analysis, peaks, duration: extent(),musicStart:state.musicStart||0, currentTime: currentTime(), viewStart, viewEnd, selectedId: state.selectedId, selectedIds:state.selection, showRaw: $('showRaw').checked, showSmooth: $('showSmooth').checked,yRange}; }
-  const callbacks = {onSeek: time => seekTo(time), onSelectBeat: (id,modifiers) => selectBeat(id,false,modifiers), onMoveBeat: (id,time) => moveBeat(id, time)};
-  const chart = TempoCharts.createTempoChart($('tempoChart'), {...callbacks,onPan:panChart,onEditStart:()=>setFollow(false),onInspectBeat:inspectBeat,onScale:scale=>{
+  function graphState() { return {timeline:musicalTimeline,selectedBar,beats: state.beats, analysis, peaks, duration: extent(),musicStart:state.musicStart||0, currentTime: currentTime(), viewStart, viewEnd, selectedId: state.selectedId, selectedIds:state.selection, showRaw: $('showRaw').checked, showSmooth: $('showSmooth').checked,yRange}; }
+  const callbacks = {onSeek: time => seekTo(time), onSelectBeat: (id,modifiers) => {selectBeat(id,false,modifiers);$('tempoChart').focus({preventScroll:true});}, onMoveBeat: (id,time) => moveBeat(id, time)};
+  const chart = TempoCharts.createTempoChart($('tempoChart'), {...callbacks,onSelectBar:bar=>{selectBar(bar);$('tempoChart').focus({preventScroll:true});},onPan:panChart,onEditStart:()=>setFollow(false),onInspectBeat:inspectBeat,onScale:scale=>{
     if(document.activeElement!==$('bpmMin'))$('bpmMin').value=String(Math.round(scale.min*100)/100);
     if(document.activeElement!==$('bpmMax'))$('bpmMax').value=String(Math.round(scale.max*100)/100);
     $('yAuto').setAttribute('aria-pressed',String(!yRange));
@@ -144,7 +146,7 @@
   function render() {
     const active = !!state.media;
     $('welcome').hidden = active; $('workspace').hidden = !active;
-    $('exportButton').disabled = !active;$('offsetButton').disabled=!state.beats.length;
+    $('exportButton').disabled = !active;$('offsetButton').disabled=!state.selection?.length;
     if (!active) return;
     $('fileName').textContent = state.media.name || t('Esecuzione');
     $('fileName').title = (state.media.name || t('Esecuzione'))+(state.media.kind==='midi'?' · '+t('MIDI sintetizzato'):'');
@@ -177,7 +179,7 @@
     else if (!state.beats.length) $('chartEmpty').replaceChildren(document.createTextNode(t('Rileva i beat o marca con')+' '),Object.assign(document.createElement('kbd'),{textContent:'T'}),document.createTextNode('.'));
     $('undoButton').disabled = !undoStack.length; $('redoButton').disabled = !redoStack.length;
     $('clearButton').disabled = !state.beats.length; $('beatListButton').disabled = !state.beats.length;
-    $('saveBeats').disabled = !state.beats.length || analysisBusy; $('saveSections').disabled = !analysis.sections.length || analysisBusy; $('saveSvg').disabled = !analysis.intervals.length || analysisBusy;
+    $('saveBeats').disabled = !state.beats.length || analysisBusy; $('saveSections').disabled = !analysis.sections.length || analysisBusy; $('savePng').disabled=$('saveSvg').disabled = !analysis.intervals.length || analysisBusy || graphicExportRunning;
     $('tempoChart').setAttribute('aria-busy',String(analysisBusy));
     $('editSections').disabled=analysisBusy||!analysis.intervals.length;
     $('sectionMode').hidden=state.sectionBoundaries==null;
@@ -271,6 +273,7 @@
     beat.fermataBefore=value;beat.expressionBefore=value?'fermata':'none';if(value)beat.breakBefore=false;changed();
   }
   function renderEditor() {
+    renderSelection();
     const index = state.beats.findIndex(b => b.id === state.selectedId); const beat = state.beats[index];
     const multiple=state.selection?.length>1;
     $('editorEmpty').hidden = !!beat; $('beatEditor').hidden = !beat||multiple;$('bulkEditor').hidden=!multiple;
@@ -530,6 +533,7 @@
     if (sourceURL) URL.revokeObjectURL(sourceURL); sourceURL=null; peaks=null;
   }
   function adoptProject(project) {
+    resetScoreWorkspace();
     ++loadToken; unloadMedia(); state={...project,selection:[],selectionAnchor:null}; yRange=null;setFollow(true); clock=0; undoStack=[]; redoStack=[]; lastTapId=null; pendingBreak=false;
     analysis=TempoAnalysis.analyze([],state.options);
     viewStart=state.musicStart||0; viewEnd=extent(); $('waveStatus').textContent=''; changed();
@@ -569,6 +573,7 @@
       unloadMedia(); sourceURL=url;currentFile=file;currentMidi=demoData?.parsed||null;
       const isVideo=file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|m4v)$/i.test(file.name);
       if (!relink) {
+        resetScoreWorkspace();
         state={advanced:cloneAdvanced(demoData?.advanced),beats:demoData?.beats || [],sectionBoundaries:null,options:{...DEFAULTS},duration,musicStart:0,selectedId:null,selection:[],selectionAnchor:null,media:null};
         analysis=TempoAnalysis.analyze([],state.options);
         undoStack=[]; redoStack=[]; yRange=null;setFollow(true); viewStart=0; viewEnd=duration;
@@ -626,17 +631,39 @@
   function csv(rows) { return '\ufeff'+rows.map(row=>row.map(cell=>'"'+String(cell??'').replaceAll('"','""')+'"').join(';')).join('\r\n'); }
   function exportProject() { persist(); download(JSON.stringify(payload(),null,2),baseName()+'.tempo.json','application/json'); toast(t('Progetto esportato.')); }
   function exportRange(scope){return scope==='view'?{start:Math.max(state.musicStart||0,viewStart),end:Math.min(viewEnd,extent())}:{start:state.musicStart||0,end:extent()};}
+  function graphicOptions(){return {...exportRange($('exportScope').value),barsPerRow:Number($('barsPerRow').value)||4,rowsPerPage:Number($('rowsPerPage').value)||4,showBeats:$('exportShowBeats').checked,language:TempoI18n.language};}
+  function updateExportPagination(){
+    const enabled=state.advanced?.enabled&&$('exportLayout').value==='bars';
+    for(const id of ['barsPerRow','rowsPerPage'])$(id).parentElement.hidden=!enabled;
+    $('exportPageCount').hidden=!enabled;
+    if(!enabled)return;
+    try{const count=TempoBarReport.pagination({timeline:musicalTimeline,beats:activeBeats(),advanced:state.advanced,beatUnit:state.options.beatUnit},graphicOptions());
+      $('exportPageCount').textContent=count.pageCount===1?t('1 pagina · {0} battute',count.barCount):t('{0} pagine · {1} battute',count.pageCount,count.barCount);
+      $('exportPageCount').dataset.tip=count.pageCount>1?t('Più pagine: immagini numerate in un file ZIP.'):' ';
+    }catch{$('exportPageCount').textContent=t(musicalError||'Imposta metro e almeno due beat in modalità avanzata.');}
+  }
   async function exportGraphic(format){
-    const {start,end}=exportRange($('exportScope').value),beats=state.beats.filter(b=>b.time>=start&&b.time<=end).map(b=>({...b}));
+    if(graphicExportRunning)return;
+    const options=graphicOptions(),{start,end}=options,beats=state.beats.filter(b=>b.time>=start&&b.time<=end).map(b=>({...b}));
     if(!beats.length)return toast(t('Nessun beat nel tratto scelto.'),true);
-    const result=TempoAnalysis.analyze(beats,state.options,state.sectionBoundaries),scale=TempoCharts.tempoScale($('exportShowBeats').checked?result.intervals:result.intervals.map(p=>({...p,bpm:p.smoothed})),$('exportScope').value==='view'?yRange:null);
     const byBars=state.advanced?.enabled&&$('exportLayout').value==='bars';
     if(byBars&&!musicalTimeline)return toast(t(musicalError||'Imposta metro e almeno due beat in modalità avanzata.'),true);
-    const report=(byBars?TempoBarReport:TempoReport).create({title:state.media?.name,duration:state.duration,beats,analysis:result,advanced:state.advanced,beatUnit:state.options.beatUnit,timeline:musicalTimeline},{start,end,scale,barsPerRow:Number($('barsPerRow').value)||8,showBeats:$('exportShowBeats').checked,language:TempoI18n.language}),filename=baseName()+'.chart.'+format;
-    $('savePng').disabled=true;$('saveSvg').disabled=true;
-    try{const content=format==='png'?await TempoExportClient.png(report.svg,report.width,report.height):report.svg;download(content,filename,format==='png'?'image/png':'image/svg+xml');}
-    catch(error){toast(error.message||t('Esportazione non riuscita.'),true);}
-    finally{$('savePng').disabled=false;$('saveSvg').disabled=false;}
+    graphicExportRunning=true;$('savePng').disabled=$('saveSvg').disabled=true;$('exportDialog').setAttribute('aria-busy','true');
+    try{
+      const result=TempoAnalysis.analyze(beats,state.options,state.sectionBoundaries);
+      options.scale=TempoCharts.tempoScale(options.showBeats?result.intervals:result.intervals.map(p=>({...p,bpm:p.smoothed})),$('exportScope').value==='view'?yRange:null);
+      const project={title:state.media?.name,duration:state.duration,beats,analysis:result,advanced:cloneAdvanced(state.advanced),beatUnit:state.options.beatUnit,timeline:musicalTimeline};
+      const reports=byBars?TempoBarReport.createPages(project,options):[TempoReport.create(project,options)],name=baseName()+'.chart',files=[];
+      for(let index=0;index<reports.length;index++){
+        const report=reports[index];
+        if(reports.length>1)$('exportPageCount').textContent=t('Esportazione {0}/{1}…',index+1,reports.length);
+        const data=format==='png'?await TempoExportClient.png(report.svg,report.width,report.height):report.svg;
+        files.push({name:name+(reports.length>1?'.'+String(index+1).padStart(String(reports.length).length<3?3:String(reports.length).length,'0'):'')+'.'+format,data});
+      }
+      if(files.length>1)download(await TempoArchive.zip(files),name+'.'+format+'.zip','application/zip');
+      else download(files[0].data,files[0].name,format==='png'?'image/png':'image/svg+xml');
+    }catch(error){toast(t(error.message||'Esportazione non riuscita.'),true);}
+    finally{graphicExportRunning=false;$('exportDialog').setAttribute('aria-busy','false');$('savePng').disabled=$('saveSvg').disabled=analysisBusy||!analysis.intervals.length;updateExportPagination();}
   }
   function cancelAudioExport(){
     audioExportGeneration++;audioExportController?.abort();audioExportController=null;
@@ -690,24 +717,26 @@
     $('selectAllBeats').checked=count>0&&count===state.beats.length;
     $('selectAllBeats').indeterminate=count>0&&count<state.beats.length;
   }
-  function offsetIds(){
-    if($('offsetScope').value==='all')return state.beats.map(b=>b.id);
-    if($('offsetScope').value==='selected')return state.selection||[];
-    const first=$('offsetFrom').valueAsNumber,last=$('offsetTo').valueAsNumber;
-    return Number.isInteger(first)&&Number.isInteger(last)&&first>=1&&last>=first&&last<=state.beats.length?state.beats.slice(first-1,last).map(b=>b.id):null;
+  function selectionBeats(){const ids=new Set(state.selection||[]);return state.beats.filter(b=>ids.has(b.id));}
+  function renderSelection(){
+    const beats=selectionBeats();
+    $('selectionSummary').textContent=beats.length?t('{0} selezionati',beats.length)+' · '+formatTime(beats[0].time,true)+(beats.length>1?' – '+formatTime(beats.at(-1).time,true):''):t('Seleziona i beat nel grafico');
+    $('selectionSummary').dataset.tip=t('Ctrl/⌘ clic: aggiungi o rimuovi. Maiusc clic: seleziona un intervallo.');
+    $('offsetButton').disabled=$('clearSelection').disabled=!beats.length;
+    $('selectVisible').disabled=$('selectChartAll').disabled=!activeBeats().length;
+    if(!beats.length)closeOffset(false);
+    $('offsetCount').textContent=t('{0} selezionati',beats.length);
   }
-  function updateOffset(){
-    const range=$('offsetScope').value==='range';$('offsetRange').hidden=!range;
-    $('offsetFrom').disabled=!range;$('offsetTo').disabled=!range;
-    $('offsetCount').textContent=t('{0} selezionati',offsetIds()?.length||0);$('offsetError').hidden=true;
+  function selectBeatSet(beats){
+    setFollow(false);state.selection=beats.map(b=>b.id);state.selectedId=state.selection[0]||null;state.selectionAnchor=state.selectedId;
+    renderEditor();requestChartRender();
   }
+  function offsetIds(){return (state.selection||[]).slice();}
+  function updateOffset(){$('offsetCount').textContent=t('{0} selezionati',offsetIds().length);$('offsetError').hidden=true;}
+  function closeOffset(focus=true){$('offsetPanel').hidden=true;$('offsetButton').setAttribute('aria-expanded','false');if(focus)$('tempoChart').focus({preventScroll:true});}
   function openOffset(){
-    if(!state.beats.length)return;
-    $('offsetScope').value=state.selection?.length?'selected':'all';
-    $('offsetSelectedOption').disabled=!state.selection?.length;
-    $('offsetFrom').max=$('offsetTo').max=String(state.beats.length);
-    $('offsetFrom').value='1';$('offsetTo').value=String(state.beats.length);
-    updateOffset();showDialog('offsetDialog');
+    if(!state.selection?.length)return;
+    updateOffset();$('offsetPanel').hidden=false;$('offsetButton').setAttribute('aria-expanded','true');$('offsetMs').focus({preventScroll:false});
   }
   function applyOffset(){
     const ids=offsetIds(),offset=$('offsetMs').valueAsNumber;
@@ -725,7 +754,7 @@
       state.selection=ids.slice();if(!selected.has(state.selectedId))state.selectedId=ids[0];state.selectionAnchor=state.selectedId;
       lastTapId=null;pendingBreak=false;changed();
     }
-    $('offsetDialog').close();$('tempoChart').focus({preventScroll:true});
+    closeOffset();
   }
 
   function cancelDetection(){
@@ -832,13 +861,24 @@
     if(!state.advanced?.enabled)return;
     try{musicalTimeline=TempoMusical.build(activeBeats(),state.advanced,state.options.beatUnit);}catch(error){musicalError=error.message;}
   }
+  function resetScoreWorkspace(){selectedBar=editingMeterBar=null;meterDirty=gridDirty=false;$('meterError').hidden=$('meterChangeError').hidden=true;closeOffset(false);}
   function renderAdvanced(){
     const enabled=!!state.advanced?.enabled;
-    $('advancedButton').setAttribute('aria-pressed',String(enabled));$('advancedPanel').hidden=!enabled;
+    $('advancedButton').setAttribute('aria-pressed',String(enabled));$('basicButton').setAttribute('aria-pressed',String(!enabled));
+    $('workspace').classList.toggle('is-advanced',enabled);$('advancedPanel').hidden=$('advancedToolbar').hidden=!enabled;
     $('barExportOptions').hidden=!enabled;$('midiExportOptions').hidden=!enabled;
     $('musicalError').hidden=!musicalError;$('musicalError').textContent=t(musicalError);
     $('saveMidiMap').disabled=$('convertMidiButton').disabled=!musicalTimeline||musicalTimeline.anchors.length<2||analysisBusy;
-    if(enabled){$('meterSummary').textContent=(musicalTimeline?.bars.length||0)+' '+t('battute');$('goBar').min=String(state.advanced.firstBar-(state.advanced.pickup>0?1:0));}
+    if(enabled){
+      if(selectedBar===null||!musicalTimeline?.bars.some(b=>b.number===selectedBar)&&!state.advanced.meters.some(m=>m.bar===selectedBar))selectedBar=musicalTimeline?.bars[0]?.number??state.advanced.firstBar;
+      $('goBar').min=String(state.advanced.firstBar-(state.advanced.pickup>0?1:0));
+      if(document.activeElement!==$('goBar'))$('goBar').value=String(selectedBar);
+      const bars=musicalTimeline?.bars||[],index=bars.findIndex(b=>b.number===selectedBar);
+      $('previousBar').disabled=index<=0;$('nextBar').disabled=index<0||index>=bars.length-1;
+      if(!gridDirty)syncGridSettings();
+      if(!meterDirty)syncMeterEditor();
+      renderMeterList();
+    }
     updateBarCounter(currentTime());
   }
   function updateBarCounter(time){
@@ -846,34 +886,97 @@
     const bar=musicalTimeline&&TempoMusical.barAtTime(musicalTimeline,time),q=musicalTimeline&&TempoMusical.quarterAtTime(musicalTimeline,time);
     $('barCounter').textContent=bar&&q!==null?t('Battuta {0}',bar.number)+' · '+bar.numerator+'/'+bar.denominator+' · '+bpm(1+(q-bar.startQuarter)*bar.denominator/4):'—';
   }
-  function renderMeterDraft(){
-    $('meterRows').replaceChildren();
-    meterDraft.forEach((meter,index)=>{
-      const row=document.createElement('div');row.className='meter-row';
-      const input=(value,label,min)=>{const node=document.createElement('input');node.type='number';node.step='1';node.value=String(value);node.required=true;if(min!==undefined)node.min=String(min);node.setAttribute('aria-label',t(label));return node;};
-      const bar=input(meter.bar,'Dalla battuta');bar.disabled=index===0;
-      bar.addEventListener('input',()=>meter.bar=bar.valueAsNumber);
-      const fraction=document.createElement('span');fraction.className='meter-fraction';const numerator=input(meter.numerator,'Numeratore',1),denominator=input(meter.denominator,'Denominatore',1);
-      numerator.addEventListener('input',()=>meter.numerator=numerator.valueAsNumber);denominator.addEventListener('input',()=>meter.denominator=denominator.valueAsNumber);
-      fraction.append(numerator,document.createTextNode('/'),denominator);
-      const remove=document.createElement('button');remove.type='button';remove.className='icon-button';remove.textContent='×';remove.disabled=index===0;remove.setAttribute('aria-label',t('Elimina cambio di metro'));remove.addEventListener('click',()=>{meterDraft.splice(index,1);renderMeterDraft();});
-      row.append(bar,fraction,remove);$('meterRows').append(row);
-    });
+  function syncGridSettings(){
+    const config=state.advanced;
+    $('firstBar').value=String(config.firstBar);$('pickupLength').value=String(config.pickup);$('advancedBeatUnit').value=String(state.options.beatUnit);
   }
-  function openMeter(){
-    const config=state.advanced||TempoMusical.validate();meterDraft=config.meters.map(m=>({...m}));meterDraftFirst=config.firstBar;
-    $('firstBar').value=String(config.firstBar);$('pickupLength').value=String(config.pickup);$('advancedBeatUnit').value=String(state.options.beatUnit);$('meterError').hidden=true;renderMeterDraft();showDialog('meterDialog');
+  function syncMeterEditor(){
+    const config=state.advanced,target=Math.max(config.firstBar,selectedBar??config.firstBar),meter=config.meters.findLast(m=>m.bar<=target)||config.meters[0];
+    editingMeterBar=config.meters.some(m=>m.bar===target)?target:null;
+    $('meterChangeBar').value=String(target);$('meterChangeBar').min=String(config.firstBar);$('meterChangeBar').disabled=target===config.firstBar;
+    $('meterNumerator').value=String(meter.numerator);$('meterDenominator').value=String(meter.denominator);
+    $('saveMeterChange').textContent=t(editingMeterBar===null?'Aggiungi cambio':'Aggiorna metro');
+    $('removeMeterChange').disabled=editingMeterBar===null||editingMeterBar===config.firstBar;
+    const bar=musicalTimeline?.bars.find(b=>b.number===selectedBar);
+    $('selectedBarSummary').textContent=number(bar?.meanBpm)?bpm(bar.meanBpm)+' BPM':'';
+    $('selectedBarSummary').hidden=!number(bar?.meanBpm);
+  }
+  function renderMeterList(){
+    const list=$('meterRows'),scroll=list.scrollTop,focusedBar=document.activeElement?.getAttribute('data-meter-bar');list.replaceChildren();
+    $('meterSummary').textContent=String(state.advanced.meters.length);
+    for(const meter of state.advanced.meters){
+      const bar=musicalTimeline?.bars.find(b=>b.number===meter.bar),row=Object.assign(document.createElement('button'),{type:'button',className:'meter-change-row'});
+      row.setAttribute('data-meter-bar',String(meter.bar));row.setAttribute('aria-pressed',String(meter.bar===editingMeterBar));
+      row.setAttribute('aria-label',t('Battuta {0} · {1}/{2}',meter.bar,meter.numerator,meter.denominator)+(number(bar?.start)?' · '+formatTime(bar.start):''));
+      row.append(Object.assign(document.createElement('span'),{className:'meter-bar-number',textContent:t('Batt.')+' '+meter.bar}),Object.assign(document.createElement('strong'),{textContent:meter.numerator+'/'+meter.denominator}),Object.assign(document.createElement('small'),{textContent:number(bar?.start)?formatTime(bar.start):'—'}));
+      row.addEventListener('click',()=>selectBar(meter.bar,true));list.append(row);if(focusedBar===String(meter.bar))row.focus({preventScroll:true});
+    }
+    list.scrollTop=scroll;
+  }
+  function focusBars(bar){
+    const bars=musicalTimeline?.bars||[],index=bars.indexOf(bar);
+    if($('barView').value==='all'){fitView();return;}
+    const count=Number($('barView').value)||4,last=bars[Math.min(bars.length-1,index+count-1)];
+    if(!number(bar?.start))return;
+    viewStart=bar.start;viewEnd=Math.min(extent(),Math.max(viewStart+.1,last?.end??musicalTimeline.anchors.at(-1)?.time??bar.start+5));updateViewControls();
+  }
+  function selectBar(value,focus=false){
+    if(!state.advanced?.enabled||!Number.isSafeInteger(value))return;
+    const bar=musicalTimeline?.bars.find(b=>b.number===value);
+    if(!bar&&!state.advanced.meters.some(m=>m.bar===value))return;
+    selectedBar=value;meterDirty=false;$('meterChangeError').hidden=true;setFollow(false);
+    if(bar&&number(bar.start)){
+      if(focus||bar.start<viewStart||bar.start>=viewEnd||viewEnd-viewStart>Math.max(.1,(bar.end??bar.start+1)-bar.start)*12)focusBars(bar);
+      seekTo(bar.start);
+    }
+    renderAdvanced();renderCharts();
+  }
+  function setAdvanced(enabled){
+    if(!!state.advanced.enabled===enabled)return;
+    checkpoint();state.advanced.enabled=enabled;meterDirty=gridDirty=false;selectedBar=null;changed();
+    if(enabled){const bar=musicalTimeline&&TempoMusical.barAtTime(musicalTimeline,currentTime())||musicalTimeline?.bars[0];if(bar)selectBar(bar.number,true);}
+  }
+  function openMeter(){setAdvanced(true);gridDirty=false;syncGridSettings();$('gridSettings').open=true;}
+  function commitGrid(config,unit){
+    if(!number(unit)||unit<=0)throw new Error('Il valore del beat non è valido.');
+    const beats=unit===state.options.beatUnit?activeBeats():activeBeats().filter(b=>!b.tempoAnchor).map(({quarter,...beat})=>beat);
+    TempoMusical.build(beats,config,unit);
+    if(JSON.stringify(config)===JSON.stringify(state.advanced)&&unit===state.options.beatUnit)return false;
+    checkpoint();
+    if(unit!==state.options.beatUnit){state.beats=state.beats.filter(b=>!b.tempoAnchor);for(const beat of state.beats)delete beat.quarter;}
+    state.options.beatUnit=unit;state.advanced=config;return true;
   }
   function applyMeter(){
     try{
-      const config=TempoMusical.validate({enabled:true,firstBar:$('firstBar').valueAsNumber,pickup:$('pickupLength').valueAsNumber,meters:meterDraft}),unit=$('advancedBeatUnit').valueAsNumber;
-      if(!number(unit)||unit<=0)throw new Error('Il valore del beat non è valido.');
-      // A changed tap value deliberately rebuilds the musical grid.
-      const beats=unit===state.options.beatUnit?activeBeats():activeBeats().filter(b=>!b.tempoAnchor).map(({quarter,...beat})=>beat);
-      TempoMusical.build(beats,config,unit);checkpoint();
-      if(unit!==state.options.beatUnit){state.beats=state.beats.filter(b=>!b.tempoAnchor);for(const beat of state.beats)delete beat.quarter;}
-      state.options.beatUnit=unit;state.advanced=config;$('meterDialog').close();changed();
+      const firstBar=$('firstBar').valueAsNumber,delta=firstBar-state.advanced.firstBar;
+      const config=TempoMusical.validate({...state.advanced,enabled:true,firstBar,pickup:$('pickupLength').valueAsNumber,meters:state.advanced.meters.map(m=>({...m,bar:m.bar+delta}))});
+      commitGrid(config,$('advancedBeatUnit').valueAsNumber);selectedBar=(selectedBar??state.advanced.firstBar)+delta;
+      meterDirty=gridDirty=false;$('meterError').hidden=true;changed();
     }catch(error){$('meterError').textContent=t(error.message);$('meterError').hidden=false;}
+  }
+  function startMeterChange(){
+    const config=state.advanced;let target=Math.max(config.firstBar,selectedBar??config.firstBar);
+    while(config.meters.some(m=>m.bar===target))target++;
+    const meter=config.meters.findLast(m=>m.bar<=target)||config.meters[0];
+    if(musicalTimeline?.bars.some(b=>b.number===target))selectBar(target);
+    editingMeterBar=null;meterDirty=true;$('meterChangeError').hidden=true;
+    $('meterChangeBar').value=String(target);$('meterChangeBar').disabled=false;
+    $('meterNumerator').value=String(meter.numerator);$('meterDenominator').value=String(meter.denominator);
+    $('saveMeterChange').textContent=t('Aggiungi cambio');$('removeMeterChange').disabled=true;renderMeterList();
+    $('meterNumerator').focus({preventScroll:true});
+  }
+  function saveMeterChange(remove=false){
+    try{
+      const first=state.advanced.firstBar,bar=$('meterChangeBar').valueAsNumber;
+      if(remove&&(editingMeterBar===null||editingMeterBar===first))return;
+      if(!remove&&editingMeterBar!==bar&&state.advanced.meters.some(m=>m.bar===bar))throw new Error('Esiste già un cambio in questa battuta.');
+      const meters=state.advanced.meters.filter(m=>m.bar!==editingMeterBar);
+      if(!remove)meters.push({bar,numerator:$('meterNumerator').valueAsNumber,denominator:$('meterDenominator').valueAsNumber});
+      const config=TempoMusical.validate({...state.advanced,meters});commitGrid(config,state.options.beatUnit);
+      selectedBar=remove?selectedBar:bar;meterDirty=false;$('meterChangeError').hidden=true;changed();
+      const target=musicalTimeline?.bars.find(b=>b.number===selectedBar);
+      if(target&&number(target.start)&&(target.start<viewStart||target.start>=viewEnd))selectBar(target.number,true);
+    }catch(error){$('meterChangeError').textContent=t(error.message);$('meterChangeError').hidden=false;}
   }
   function midiMap(){
     if(!state.advanced?.enabled||!musicalTimeline||musicalTimeline.anchors.length<2)throw new Error('Imposta metro e almeno due beat in modalità avanzata.');
@@ -1037,18 +1140,27 @@
   $('prevPage').addEventListener('click',()=>{page--;renderBeatTable();});$('nextPage').addEventListener('click',()=>{page++;renderBeatTable();});
   $('offsetButton').addEventListener('click',openOffset);$('offsetSelection').addEventListener('click',openOffset);
   $('singleSelection').addEventListener('click',()=>{if(state.selectedId)selectBeat(state.selectedId);});
-  $('offsetScope').addEventListener('change',updateOffset);
-  for(const id of ['offsetFrom','offsetTo','offsetMs'])$(id).addEventListener('input',updateOffset);
+  $('selectVisible').addEventListener('click',()=>selectBeatSet(activeBeats().filter(b=>b.time>=viewStart&&b.time<=viewEnd)));
+  $('selectChartAll').addEventListener('click',()=>selectBeatSet(activeBeats()));
+  $('clearSelection').addEventListener('click',()=>selectBeatSet([]));
+  $('cancelOffset').addEventListener('click',()=>closeOffset());
+  $('offsetMs').addEventListener('input',updateOffset);
   $('offsetForm').addEventListener('submit',e=>{e.preventDefault();if($('offsetForm').reportValidity())applyOffset();});
+  $('offsetForm').addEventListener('keydown',e=>{if(e.code==='Escape'){e.preventDefault();closeOffset();}});
   $('selectAllBeats').addEventListener('change',e=>{state.selection=e.target.checked?state.beats.map(b=>b.id):[];state.selectedId=state.selection[0]||null;state.selectionAnchor=state.selectedId;renderEditor();requestChartRender();renderBeatTable();});
-  $('exportButton').addEventListener('click',()=>showDialog('exportDialog'));
+  $('exportButton').addEventListener('click',()=>{updateExportPagination();showDialog('exportDialog');});
+  for(const id of ['exportLayout','exportScope','barsPerRow','rowsPerPage'])$(id).addEventListener('change',updateExportPagination);
 
-  $('advancedButton').addEventListener('click',()=>{if(!state.advanced?.enabled){openMeter();return;}checkpoint();state.advanced.enabled=false;changed();});
-  $('editMeter').addEventListener('click',openMeter);
-  $('firstBar').addEventListener('input',()=>{const next=$('firstBar').valueAsNumber;if(!Number.isSafeInteger(next))return;const delta=next-meterDraftFirst;meterDraft.forEach(m=>m.bar+=delta);meterDraftFirst=next;renderMeterDraft();});
-  $('addMeter').addEventListener('click',()=>{const last=meterDraft.at(-1);meterDraft.push({...last,bar:last.bar+1});renderMeterDraft();});
+  $('advancedButton').addEventListener('click',()=>setAdvanced(true));$('basicButton').addEventListener('click',()=>setAdvanced(false));
+  for(const id of ['firstBar','pickupLength','advancedBeatUnit'])$(id).addEventListener('input',()=>{gridDirty=true;$('meterError').hidden=true;});
+  for(const id of ['meterChangeBar','meterNumerator','meterDenominator'])$(id).addEventListener('input',()=>{meterDirty=true;$('meterChangeError').hidden=true;});
   $('meterForm').addEventListener('submit',e=>{e.preventDefault();if($('meterForm').reportValidity())applyMeter();});
-  $('goBarButton').addEventListener('click',()=>{const bar=musicalTimeline?.bars.find(b=>b.number===$('goBar').valueAsNumber);if(!bar||!number(bar.start))return;setFollow(false);viewStart=bar.start;viewEnd=Math.max(bar.start+.1,bar.end??bar.start+5);seekTo(bar.start);updateViewControls();renderCharts();});
+  $('meterChangeForm').addEventListener('submit',e=>{e.preventDefault();if($('meterChangeForm').reportValidity())saveMeterChange();});
+  $('addMeter').addEventListener('click',startMeterChange);
+  $('removeMeterChange').addEventListener('click',()=>saveMeterChange(true));
+  $('barNavigation').addEventListener('submit',e=>{e.preventDefault();const value=$('goBar').valueAsNumber;if(!musicalTimeline?.bars.some(b=>b.number===value)&&!state.advanced.meters.some(m=>m.bar===value)){toast(t('Questa battuta non è coperta dai beat.'),true);return;}selectBar(value,true);});
+  for(const [id,direction] of [['previousBar',-1],['nextBar',1]])$(id).addEventListener('click',()=>{const bars=musicalTimeline?.bars||[],index=bars.findIndex(b=>b.number===selectedBar);if(bars[index+direction])selectBar(bars[index+direction].number,true);});
+  $('barView').addEventListener('change',()=>{const bar=musicalTimeline?.bars.find(b=>b.number===selectedBar);setFollow(false);if(bar)focusBars(bar);renderCharts();});
   $('saveMidiMap').addEventListener('click',exportMidiMap);$('convertMidiButton').addEventListener('click',openMidiConvert);
   $('chooseTargetMidi').addEventListener('click',()=>$('targetMidiInput').click());$('targetMidiInput').addEventListener('change',e=>{chooseMidiTarget(e.target.files[0]);e.target.value='';});
   $('midiConvertDialog').addEventListener('close',()=>{midiTargetGeneration++;});
@@ -1064,15 +1176,30 @@
   $('audioExportForm').addEventListener('submit',e=>{e.preventDefault();if($('audioExportForm').reportValidity())exportAudio();});
   $('cancelAudioExport').addEventListener('click',cancelAudioExport);$('audioExportDialog').addEventListener('close',cancelAudioExport);
 
+  // Transport takes precedence over native Space activation in the workspace.
+  // Text entry keeps literal spaces; Enter still activates focused controls.
+  let transportSpace=false;
   document.addEventListener('keydown',e=>{
+    if(e.code!=='Space'||e.ctrlKey||e.metaKey||e.altKey||e.isComposing||!state.media)return;
+    const target=e.target,input=target.closest('input');
+    if(target.closest('textarea,[contenteditable="true"],[contenteditable=""]')||(input&&!['number','range','checkbox','radio','button','submit','reset'].includes(input.type)))return;
+    e.preventDefault();e.stopPropagation?.();transportSpace=true;
+    if(e.repeat)return;
+    // Blur commits a number edit's native change event before audition starts.
+    target.closest('input,select,button,a,summary,[role="button"]')?.blur();
+    (document.querySelector('dialog[open]')||$('tempoChart')).focus({preventScroll:true});togglePlay();
+  },true);
+  document.addEventListener('keyup',e=>{if(e.code==='Space'&&transportSpace){e.preventDefault();e.stopPropagation?.();transportSpace=false;}},true);
+  window.addEventListener('blur',()=>{transportSpace=false;});
+  document.addEventListener('keydown',e=>{
+    if(e.defaultPrevented)return;
     if(e.code==='Escape')hideTooltip();
     if(e.repeat || document.querySelector('dialog[open]'))return;
     const target=e.target;
     if(target.closest('input,select,textarea,[contenteditable="true"]'))return;
     if((e.ctrlKey||e.metaKey)&&e.code==='KeyZ'){e.preventDefault();e.shiftKey?redo():undo();return;}
     if(e.ctrlKey||e.metaKey||e.altKey)return;
-    if(e.code==='Space') {if(target.closest('button,a,summary,[role="button"]'))return;e.preventDefault();togglePlay();}
-    else if(e.code==='KeyT'){e.preventDefault();tap();}
+    if(e.code==='KeyT'){e.preventDefault();tap();}
     else if(e.code==='ArrowLeft'||e.code==='ArrowRight'){if(!state.media)return;e.preventDefault();seekTo(currentTime()+(e.code==='ArrowLeft'?-1:1)*(e.shiftKey?5:1));}
     else if(e.code==='Delete'||e.code==='Backspace'){if(state.selection?.length>1)return;if(state.selectedId){e.preventDefault();removeSelected();}}
   });
