@@ -64,7 +64,7 @@ function createDOM(html) {
     const [token, tag, attributeText] = match;
     if (token.startsWith('</')) {if (stack.at(-1).tagName === tag.toUpperCase()) stack.pop(); continue;}
     const attrs = {};
-    for (const attr of attributeText.matchAll(/([\w:-]+)(?:="([^"]*)")?/g)) attrs[attr[1]] = attr[2] || '';
+    for (const attr of attributeText.matchAll(/([\w:-]+)(?:="([^"]*)")?/g)) attrs[attr[1]] = (attr[2] || '').replace(/&(?:amp|lt|gt|quot|#x27);/g,s=>({'&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'"','&#x27;':"'"}[s]));
     const node = new Element(tag, attrs); node.ownerDocument = document;
     stack.at(-1).append(node); if (node.id) ids.set(node.id, node);
     if (!voidTags.has(tag) && !token.endsWith('/>')) stack.push(node);

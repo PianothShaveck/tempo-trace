@@ -1,6 +1,7 @@
 /* Tempo Trace — responsive, dependency-free SVG timelines. */
 (function (global) {
   'use strict';
+  const t=(key,...args)=>global.TempoI18n.t(key,...args);
   const NS = 'http://www.w3.org/2000/svg';
   const palette = {bg:'#101820',grid:'#243341',muted:'#91a1b3',text:'#eaf3f8',teal:'#69e1cb',violet:'#b1a1ff',amber:'#ffbf69',lavender:'#d5b4ff'};
   let chartSerial = 0;
@@ -13,7 +14,7 @@
   function node(tag, attrs, text) {
     const element = document.createElementNS(NS, tag);
     if (attrs) for (const [key, value] of Object.entries(attrs)) if (value != null) element.setAttribute(key, String(value));
-    if (text != null) element.textContent = text;
+    if (text != null) element.textContent = t(text);
     return element;
   }
   function timeLabel(seconds, precise) {
@@ -61,6 +62,8 @@
   function create(svg, callbacks, waveform) {
     callbacks = callbacks || {};
     const serial = ++chartSerial;
+    let selectedIds=new Set();
+    const selectedBeat=id=>selectedIds.has(String(id));
     let state = {}, geometry = null, points = [], anchors = [], visibleBeats = [], intervalsByBeat = new Map(), beatsById = new Map(), drag = null, panDrag = null, disposed = false;
     let playhead = null, playheadDot = null, tooltip = null, tooltipText = null, tooltipBox = null, dragGhost = null;
     let resizeFrame = null, lastWidth = 0;
@@ -121,6 +124,7 @@
     function render(nextState) {
       if (disposed) return;
       state = nextState || {};
+      selectedIds=new Set((state.selectedIds||[state.selectedId]).filter(id=>id!=null).map(String));
       beatsById = waveform ? new Map() : new Map((state.beats || []).map(beat => [String(beat.id),beat]));
       const rect = svg.getBoundingClientRect();
       const width = Math.max(waveform ? 120 : 320, Math.round(rect.width || svg.clientWidth || 1100));
@@ -144,8 +148,8 @@
       svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio','xMidYMid meet');
       svg.replaceChildren();
-      svg.append(node('title',{id:titleId},waveform ? 'Forma d’onda e posizione di ascolto' : 'Andamento dei BPM nel tempo'));
-      svg.append(node('desc',{id:descriptionId},waveform ? 'Clicca sulla traccia per spostare la riproduzione. Questa traccia non modifica i beat.' : 'BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. I cerchi vuoti viola indicano beat automatici da rivedere. La riga Beat rende visibili tutte le posizioni. I quadrati di ripresa usano il BPM del beat successivo. Trascina lo sfondo per spostare la vista orizzontalmente e verticalmente. Seleziona un beat, poi trascinalo per correggerlo. Se i punti sono ravvicinati, il clic li ingrandisce. Le correzioni sono disponibili anche nei controlli numerici.'));
+      svg.append(node('title',{id:titleId},waveform ? t('Forma d’onda e posizione di ascolto') : t('Andamento dei BPM nel tempo')));
+      svg.append(node('desc',{id:descriptionId},waveform ? t('Clicca sulla traccia per spostare la riproduzione. Questa traccia non modifica i beat.') : t('BPM grezzi in viola, andamento smussato in verde, anomalie in arancione. Le fermate sono rombi lilla: pieni se confermati, vuoti se possibili. I cerchi vuoti viola indicano beat automatici da rivedere. La riga Beat rende visibili tutte le posizioni. I quadrati di ripresa usano il BPM del beat successivo. Trascina lo sfondo per spostare la vista orizzontalmente e verticalmente. Seleziona un beat, poi trascinalo per correggerlo. Se i punti sono ravvicinati, il clic li ingrandisce. Le correzioni sono disponibili anche nei controlli numerici.')));
       svg.append(node('rect',{width,height,fill:palette.bg,rx:12}));
       const defs = node('defs');
       const clip = node('clipPath',{id:`tempo-clip-${serial}`});
@@ -265,14 +269,14 @@
       // One compound path avoids thousands of DOM nodes on dense automatic tracks.
       const reviewGlyphs=[],reviewPixels=new Set();
       for (const p of points) {
-        if (p.anomaly || isHold(p) || String(p.beatId)===String(state.selectedId) || !isLowAutomatic(beatsById.get(String(p.beatId)))) continue;
+        if (p.anomaly || isHold(p) || selectedBeat(p.beatId) || !isLowAutomatic(beatsById.get(String(p.beatId)))) continue;
         const px=g.x(Number(p.end)),py=markerY(Number(p.bpm)),pixel=Math.round(px)+','+Math.round(py);
         if(reviewPixels.has(pixel)) continue; reviewPixels.add(pixel);
         reviewGlyphs.push(`M${(px+4.1).toFixed(2)},${py.toFixed(2)}a4.1,4.1 0 1,0 -8.2,0a4.1,4.1 0 1,0 8.2,0Z`);
       }
       if(reviewGlyphs.length) {
         const reviews=node('path',{d:reviewGlyphs.join(' '),fill:palette.bg,stroke:palette.violet,'stroke-width':1.5});
-        reviews.append(node('title',null,'Automatico · da rivedere'));plot.append(reviews);
+        reviews.append(node('title',null,t('Automatico · da rivedere')));plot.append(reviews);
       }
       const anomalies=points.filter(p=>p.anomaly && !isHold(p));
       for(const p of anomalies) {
@@ -301,17 +305,18 @@
         const px=g.x(p.end),py=markerY(p.bpm),direction=p.bpm>g.max?-1:1;
         plot.append(node('path',{d:`M${px},${py+direction*5}L${px-5},${py-direction*3}H${px+5}Z`,fill:palette.amber}));
       }
-      const selected=points.find(p=>String(p.beatId)===String(state.selectedId));
-      if(selected) {
+      const selectedPixels=new Set();
+      for(const selected of points.filter(p=>selectedBeat(p.beatId))) {
+        const pixel=Math.round(g.x(selected.end));if(selectedPixels.has(pixel))continue;selectedPixels.add(pixel);
         const px=g.x(Number(selected.end)),py=markerY(Number(selected.bpm));
-        plot.append(node('line',{x1:px,x2:px,y1:g.top,y2:g.height-g.bottom,stroke:palette.teal,'stroke-opacity':.4,'stroke-dasharray':'3 4'}));
-        plot.append(node('circle',{cx:px,cy:py,r:7,fill:palette.bg,stroke:palette.teal,'stroke-width':2.3}));
-        plot.append(node('circle',{cx:px,cy:py,r:2.5,fill:palette.text}));
+        if(selectedIds.size===1)plot.append(node('line',{x1:px,x2:px,y1:g.top,y2:g.height-g.bottom,stroke:palette.teal,'stroke-opacity':.4,'stroke-dasharray':'3 4'}));
+        plot.append(node('circle',{cx:px,cy:py,r:selectedIds.size>1?3.5:7,fill:palette.bg,stroke:palette.teal,'stroke-width':2.3}));
+        if(selectedIds.size===1)plot.append(node('circle',{cx:px,cy:py,r:2.5,fill:palette.text}));
       }
       for(const anchor of anchors){
-        const px=g.x(anchor.time),py=markerY(anchor.next.bpm),selected=String(anchor.beat.id)===String(state.selectedId);
+        const px=g.x(anchor.time),py=markerY(anchor.next.bpm),selected=selectedBeat(anchor.beat.id);
         const marker=node('rect',{x:px-5,y:py-5,width:10,height:10,rx:2,fill:palette.bg,stroke:selected?palette.teal:palette.violet,'stroke-width':selected?2.5:1.8,'data-anchor-beat':anchor.beat.id});
-        marker.append(node('title',null,'Ripresa · BPM dal beat successivo'));plot.append(marker);
+        marker.append(node('title',null,t('Ripresa · BPM dal beat successivo')));plot.append(marker);
       }
     }
     function markerY(bpm){return clamp(geometry.y(bpm),geometry.top+7,geometry.height-geometry.bottom-7);}
@@ -319,13 +324,13 @@
       const g=geometry,lane=node('g',{'data-beat-lane':'true'});
       lane.append(node('rect',{x:g.left,y:g.laneY-20,width:g.plotWidth,height:44,rx:6,fill:'#192735'}));
       lane.append(label(g.left-8,g.laneY+4,'Beat',{'text-anchor':'end','font-size':10}));
-      const marks={normal:[],review:[]},seen=new Set();
+      const marks={normal:[],review:[]},seen=new Set(),selectedPixels=new Set();
       const all=state.beats||[],first=all.findIndex(b=>b===visibleBeats[0]);
       for(let i=0;i<visibleBeats.length;i++){
-        const beat=visibleBeats[i],px=g.x(beat.time),selected=String(beat.id)===String(state.selectedId),pixel=Math.round(px);
+        const beat=visibleBeats[i],px=g.x(beat.time),selected=selectedBeat(beat.id),pixel=Math.round(px);
         if(seen.has(pixel)&&!selected)continue;seen.add(pixel);
-        if(selected)lane.append(node('rect',{x:px-5,y:g.laneY-10,width:10,height:20,rx:3,fill:palette.teal,stroke:palette.text,'stroke-width':1,'data-selected-beat':beat.id}));
-        else marks[isLowAutomatic(beat)?'review':'normal'].push(`M${px},${g.laneY-7}V${g.laneY+7}`);
+        if(selected&&!selectedPixels.has(pixel)){selectedPixels.add(pixel);lane.append(node('rect',{x:px-5,y:g.laneY-10,width:10,height:20,rx:3,fill:palette.teal,stroke:palette.text,'stroke-width':1,'data-selected-beat':beat.id}));}
+        else if(!selected) marks[isLowAutomatic(beat)?'review':'normal'].push(`M${px},${g.laneY-7}V${g.laneY+7}`);
         const gap=Math.min(i?px-g.x(visibleBeats[i-1].time):Infinity,i+1<visibleBeats.length?g.x(visibleBeats[i+1].time)-px:Infinity);
         if(gap>34)lane.append(label(px,g.laneY+20,String(first+i+1),{'text-anchor':'middle','font-size':9,fill:selected?palette.teal:palette.muted}));
       }
@@ -394,7 +399,7 @@
         const next=index>=0&&index<beats.length-1?Number(beats[index+1].time):Number(state.duration);
         const gap=Math.min(index>0?geometry.x(found.time)-geometry.x(previous):Infinity,index<beats.length-1?geometry.x(next)-geometry.x(found.time):Infinity);
         const safety=Math.min(.08,Math.min(index>0?found.time-previous:Infinity,index<beats.length-1?next-found.time:Infinity)*.25);
-        drag={canMove:String(found.id)===String(state.selectedId)&&gap>=14,dense:gap<14,id:found.id,originalTime:found.time,time:found.time,y:found.y,startX:point.x,startY:point.y,moved:false,pointerId:event.pointerId,min:previous+(index>0?safety:0),max:next-(index>=0&&index<beats.length-1?safety:0)};
+        drag={toggle:!!(event.ctrlKey||event.metaKey),extend:!!event.shiftKey,canMove:selectedIds.size<=1&&!event.ctrlKey&&!event.metaKey&&!event.shiftKey&&String(found.id)===String(state.selectedId)&&gap>=14,dense:gap<14,id:found.id,originalTime:found.time,time:found.time,y:found.y,startX:point.x,startY:point.y,moved:false,pointerId:event.pointerId,min:previous+(index>0?safety:0),max:next-(index>=0&&index<beats.length-1?safety:0)};
         svg.setPointerCapture(event.pointerId);
         event.preventDefault();
       } else {
@@ -428,16 +433,16 @@
       } else {
         if(waveform){const time=clamp(geometry.start+(point.x-geometry.left)/geometry.plotWidth*(geometry.end-geometry.start),0,Number(state.duration));svg.style.cursor='pointer';showTooltip(point.x,geometry.top,timeLabel(time,true));return;}
         const found=hit(point);
-        svg.style.cursor=found?(String(found.id)===String(state.selectedId)?'ew-resize':'pointer'):'grab';
+        svg.style.cursor=found?(selectedIds.size<=1&&String(found.id)===String(state.selectedId)?'ew-resize':'pointer'):'grab';
         if(found) {
           const interval=found.interval || (waveform ? intervalsByBeat.get(String(found.id)) : null);
           const expression=interval && expressionNames[interval.expressive] || (found.beat && found.beat.fermataBefore ? 'Fermata' : '');
           const suspicious=interval && interval.anomaly && !isHold(interval) ? interval.anomaly : '';
-          const annotation=[suspicious,expression,found.anchor ? 'Ripresa' : ''].filter(Boolean).join(' · ');
+          const annotation=[t(suspicious),t(expression),found.anchor ? t('Ripresa') : ''].filter(Boolean).join(' · ');
           const text=`${timeLabel(found.time,true)}${annotation ? ' · '+annotation : ''}${found.interval ? ' · '+Number(found.interval.bpm).toFixed(1)+' BPM' : ''}`;
           const beat=found.beat || beatsById.get(String(found.id));
-          const automatic=isAutomatic(beat) ? (isLowAutomatic(beat) ? 'Automatico · da rivedere' : 'Automatico') : '';
-          showTooltip(geometry.x(found.time),found.y,text,[found.anchor?'BPM dal beat successivo: '+Number(found.anchor.next.bpm).toFixed(1):automatic,String(found.id)===String(state.selectedId)?'Trascina per correggere':'Clic per selezionare'].filter(Boolean).join(' · '));
+          const automatic=isAutomatic(beat) ? (isLowAutomatic(beat) ? t('Automatico · da rivedere') : t('Automatico')) : '';
+          showTooltip(geometry.x(found.time),found.y,text,[found.anchor?t('BPM dal beat successivo: {0}',Number(found.anchor.next.bpm).toFixed(1)):automatic,String(found.id)===String(state.selectedId)?t('Trascina per correggere'):t('Clic per selezionare')].filter(Boolean).join(' · '));
         } else hideTooltip();
       }
     }
@@ -453,8 +458,8 @@
       if(dragGhost) dragGhost.setAttribute('visibility','hidden');
       hideTooltip();svg.style.cursor='grab';
       if(!cancelled) {
-        if(callbacks.onSelectBeat) callbacks.onSelectBeat(completed.id);
-        if(completed.dense&&callbacks.onInspectBeat)callbacks.onInspectBeat(completed.id);
+        if(callbacks.onSelectBeat) callbacks.onSelectBeat(completed.id,{toggle:completed.toggle,extend:completed.extend});
+        if(completed.dense&&!completed.toggle&&!completed.extend&&callbacks.onInspectBeat)callbacks.onInspectBeat(completed.id);
         if(completed.canMove&&completed.moved && Math.abs(completed.time-completed.originalTime)>.0001 && callbacks.onMoveBeat) callbacks.onMoveBeat(completed.id,completed.time);
       }
     }

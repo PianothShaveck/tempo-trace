@@ -49,7 +49,7 @@ test('serialized export worker runs without imports and transfers valid WAV',()=
 });
 test('SVG report escapes filenames and includes calculated statistics, sections and separate beat lane',()=>{
  const beats=Array.from({length:61},(_,i)=>({id:String(i),time:i*.5})),analysis=Analysis.analyze(beats);
- const report=Report.create({title:'Piano <script>alert(1)</script> & "test"',duration:30,beats,analysis},{scale:{min:110,max:130}});
+ const report=Report.create({title:'Piano <script>alert(1)</script> & "test"',duration:30,beats,analysis},{scale:{min:110,max:130},showBeats:true,language:'it'});
  assert.ok(report.svg.includes('&lt;script&gt;'));assert.ok(!report.svg.includes('<script>'));assert.ok(report.svg.includes('120 BPM'));assert.ok(report.svg.includes('SEZIONI'));assert.ok(report.svg.includes('>Beat</text>'));
  assert.ok(!/NaN|Infinity/.test(report.svg));assert.equal(report.width,1440);assert.ok(report.height>=856);
 });
@@ -90,4 +90,30 @@ test('click-only export needs no original audio and cancellation terminates its 
 test('PNG conversion releases SVG URL on both success and decode failure',async()=>{
  const h=clientHarness();assert.equal((await h.client.png('<svg/>',1440,856)).type,'image/png');assert.equal(h.revoked.length,1);
  const failed=clientHarness({imageFails:true});await assert.rejects(failed.client.png('<svg/>',1440,856),/generare/);assert.equal(failed.revoked.length,1);
+});
+
+test('report defaults to trend only; beat markers and the beat lane are opt-in',()=>{
+ const beats=Array.from({length:601},(_,i)=>({id:String(i),time:i*.5})),analysis=Analysis.analyze(beats),project={title:'Long recording',duration:300,beats,analysis};
+ const plain=Report.create(project).svg,detail=Report.create(project,{showBeats:true}).svg;
+ assert.ok(plain.includes('AVERAGE'));assert.ok(plain.includes('SECTIONS'));assert.ok(plain.includes('data-expression="trend"'));
+ assert.ok(!plain.includes('<circle'));assert.ok(!plain.includes('data-raw-beats'));assert.ok(!plain.includes('>Beat</text>'));
+ assert.ok(detail.includes('<circle'));assert.ok(detail.includes('data-raw-beats'));assert.ok(detail.includes('>Beat</text>'));
+ const italian=Report.create(project,{language:'it'}).svg;assert.ok(italian.includes('MEDIO'));assert.ok(italian.includes('SEZIONI'));
+});
+
+test('report colors accelerando and rallentando segments and keeps fermatas visible without beat dots',()=>{
+ let time=0;const beats=[{id:'0',time}];
+ for(const bpm of [...Array(20).fill(90),...Array.from({length:40},(_,i)=>90+i*1.8),...Array(20).fill(162),...Array.from({length:40},(_,i)=>162-i*1.8),...Array(20).fill(90)]){time+=60/bpm;beats.push({id:String(beats.length),time});}
+ beats[75].fermataBefore=true;const analysis=Analysis.analyze(beats);assert.ok(analysis.events.some(e=>e.type==='accelerando'));assert.ok(analysis.events.some(e=>e.type==='rallentando'));
+ const svg=Report.create({title:'Expression',duration:time,beats,analysis}).svg;
+ for(const type of ['accelerando','rallentando'])assert.match(svg,new RegExp('data-expression="'+type+'"'));
+ assert.ok(svg.includes('#b75b12'));assert.ok(svg.includes('#515fbd'));assert.ok(svg.includes('>Accelerando<'));assert.ok(svg.includes('>Rallentando<'));assert.ok(svg.includes('>Fermata<'));assert.ok(!svg.includes('<circle'));
+});
+
+test('report never connects the trend across a gap',()=>{
+ const beats=[0,.5,1,10,10.5,11].map((time,i)=>({id:String(i),time,breakBefore:i===3})),analysis=Analysis.analyze(beats);
+ const svg=Report.create({duration:11,beats,analysis},{scale:{min:100,max:140}}).svg;
+ const path=svg.match(/data-expression="trend" d="([^"]+)"/)[1];
+ const segments=[...path.matchAll(/M([\d.-]+) ([\d.-]+)L([\d.-]+) ([\d.-]+)/g)];assert.equal(segments.length,4);
+ assert.ok(segments.every(m=>Number(m[3])-Number(m[1])<100));
 });

@@ -26,9 +26,10 @@ function boot(storageEntries = [], overrides = {}) {
     localStorage: {getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value)},
     setTimeout: () => ++taskId, clearTimeout() {}, requestAnimationFrame: () => ++taskId, cancelAnimationFrame() {},
     URL: {revokeObjectURL() {}, createObjectURL: () => 'blob:test'}, Blob, AbortController, console, ...overrides});
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../assets/i18n.js'),'utf8'),context,{filename:'i18n.js'});
   // Expose only in this VM copy. Production app remains a closed IIFE.
   const hook = `globalThis.app = {validateProject, adoptProject, loadProject, loadFile, tap, moveBeat, removeSelected,
-    selectBeat, undo, redo, seekTo, persist, payload, snapshot, openDetection, runDetection, applyDetection, cancelDetection, exportGraphic, exportAudio, followPlayhead, panChart, animatePlayback,
+    selectBeat, undo, redo, seekTo, persist, payload, snapshot, openDetection, runDetection, applyDetection, cancelDetection, exportGraphic, exportAudio, followPlayhead, panChart, animatePlayback, openOffset, applyOffset,
     get view(){return {start:viewStart,end:viewEnd,yRange,follow:followPlayback};},
     attachFile(file = {name:'piano.wav',size:1234}) {currentFile = file;}, setView(start, end) {viewStart=start;viewEnd=end;},
     stubProbe(duration=30) {probeFile=async()=>duration;},
@@ -203,18 +204,23 @@ test('continuous listening remains connected; explicitly seeking ahead starts a 
   assert.equal(h.api.analysis.stats.mean, 120);
 });
 
-test('keyboard tap works once and respects held keys, editable fields, controls, and dialogs', () => {
+test('Space toggles playback, T taps once, and typing/native controls/dialogs remain usable', () => {
   const h = boot(); h.open(); h.api.attachMedia(); h.media.currentTime = 1;
   assert.equal(h.press('Space').defaultPrevented, true);
-  assert.equal(h.api.state.beats.length, 1);
-  h.media.currentTime = 2;
-  h.press('Space', h.document.body, {repeat: true});
-  h.press('Space', h.$('beatTime')); h.press('Space', h.$('speed')); h.press('Space', h.$('playButton'));
-  h.$('helpDialog').showModal(); h.press('Space'); h.$('helpDialog').close();
-  assert.equal(h.api.state.beats.length, 1);
-  h.press('Space', h.$('tapButton')); assert.equal(h.api.state.beats.length, 2);
-  h.press('KeyZ', h.document.body, {ctrlKey: true}); assert.equal(h.api.state.beats.length, 1);
-  h.press('KeyZ', h.document.body, {ctrlKey: true, shiftKey: true}); assert.equal(h.api.state.beats.length, 2);
+  assert.equal(h.media.paused, false);assert.equal(h.api.state.beats.length,0);
+  h.press('Space');assert.equal(h.media.paused,true);
+  h.press('KeyT');assert.equal(h.api.state.beats.length,1);
+  h.media.currentTime=2;
+  h.press('KeyT',h.document.body,{repeat:true});
+  h.press('KeyT',h.$('beatTime'));h.press('KeyT',h.$('speed'));
+  assert.equal(h.press('Space',h.$('playButton')).defaultPrevented,false);
+  assert.equal(h.press('Space',h.$('beatTime')).defaultPrevented,false);
+  h.$('helpDialog').showModal();h.press('KeyT');h.press('Space');h.$('helpDialog').close();
+  assert.equal(h.api.state.beats.length,1);assert.equal(h.media.paused,true);
+  h.press('KeyP');assert.equal(h.media.paused,true);
+  h.press('KeyT',h.$('tempoChart'));assert.equal(h.api.state.beats.length,2);
+  h.press('KeyZ',h.document.body,{ctrlKey:true});assert.equal(h.api.state.beats.length,1);
+  h.press('KeyZ',h.document.body,{ctrlKey:true,shiftKey:true});assert.equal(h.api.state.beats.length,2);
 });
 
 test('invalid JSON imports leave the current session and history intact', async () => {
@@ -457,7 +463,8 @@ test('graphic export uses the selected excerpt with its own BPM statistics',asyn
  const h=boot([],{TempoReport:{create(project,options){report={project,options};return {svg:'<svg/>',width:1440,height:856};}}});
  h.open(project([0,.5,1,1.5,2,3,4]));h.api.setView(1.5,4);h.$('exportScope').value='view';await h.api.exportGraphic('svg');
  assert.deepEqual(plain(report.project.beats.map(b=>b.time)),[1.5,2,3,4]);assert.equal(report.options.start,1.5);assert.equal(report.options.end,4);assert.equal(report.project.analysis.stats.mean,72);
- assert.equal(h.$('saveSvg').disabled,false);
+ assert.equal(h.$('saveSvg').disabled,false);assert.equal(report.options.showBeats,false);assert.equal(report.options.language,'en');
+ h.$('exportShowBeats').checked=true;h.$('language').value='it';h.$('language').dispatch('change');await h.api.exportGraphic('svg');assert.equal(report.options.showBeats,true);assert.equal(report.options.language,'it');
 });
 test('audio dialog exports click-only excerpts without a linked source and ignores completion after cancellation',async()=>{
  let pending,downloads=0;
@@ -525,4 +532,71 @@ test('manual boundaries reach the background worker and graphic export',async()=
  let report;
  const g=boot([],{TempoReport:{create(project){report=project;return {svg:'<svg/>',width:1440,height:884};}}});
  g.open(project([0,.5,1,1.5,2],{sectionBoundaries:[1]}));await g.api.exportGraphic('svg');assert.equal(report.analysis.sections.length,2);assert.equal(report.analysis.sections[1].start,1);
+});
+
+test('reviewing a beat focuses the chart, so Space plays and T taps without editing the time field',()=>{
+ const h=boot();h.open(project([1,1.5,2,2.5],{beats:[1,1.5,2,2.5].map((time,i)=>({id:'b'+i,time,source:'auto',confidence:.2}))}));h.api.attachMedia();
+ h.$('anomalyList').children[0].click();assert.equal(h.document.activeElement,h.$('tempoChart'));
+ assert.equal(h.press('Space',h.document.activeElement).defaultPrevented,true);assert.equal(h.media.paused,false);
+ h.media.currentTime=3;h.press('KeyT',h.document.activeElement);assert.equal(h.api.state.beats.at(-1).time,3);
+});
+
+test('candidate fermatas can be confirmed directly, undone, and preserved in a reimported project',()=>{
+ const h=boot(),times=Array.from({length:35},(_,i)=>i*.5+(i>=17?1.5:0));h.open(project(times));
+ const candidate=h.api.analysis.events.find(e=>e.confidence==='candidate');assert.ok(candidate);
+ const index=h.api.analysis.events.indexOf(candidate),row=h.$('expressionList').children[index];
+ row.children[0].click();assert.equal(h.document.activeElement,h.$('tempoChart'));
+ const confirm=row.children[1];assert.equal(confirm.textContent,'Confirm fermata');assert.match(confirm.getAttribute('aria-label'),/0:08/);
+ const before=plain(h.api.payload());confirm.click();
+ assert.ok(h.api.analysis.events.some(e=>e.beatId===candidate.beatId&&e.confidence==='manual'));
+ assert.ok(!h.api.analysis.events.some(e=>e.beatId===candidate.beatId&&e.confidence==='candidate'));
+ const saved=plain(h.api.payload());assert.equal(saved.beats.find(b=>b.id===candidate.beatId).fermataBefore,true);
+ h.api.undo();assert.deepEqual(plain(h.api.payload().beats),before.beats);
+ h.api.redo();assert.equal(h.api.state.beats.find(b=>b.id===candidate.beatId).fermataBefore,true);
+ const fresh=boot();fresh.open(saved);assert.ok(fresh.api.analysis.events.some(e=>e.confidence==='manual'));
+});
+
+test('English is default; first-visit Italian choice persists without modifying the project or playback',()=>{
+ const h=boot();assert.equal(h.document.querySelector('html').getAttribute('lang'),'en');assert.equal(h.$('languagePrompt').hidden,false);
+ h.open(project([1,1.5,2]));h.api.attachMedia();h.media.play();const before=plain(h.api.payload());
+ h.$('chooseItalian').click();assert.equal(h.document.querySelector('html').getAttribute('lang'),'it');assert.equal(h.$('languagePrompt').hidden,true);
+ assert.equal(h.$('playButton').getAttribute('aria-label'),'Pausa');assert.equal(h.$('fitView').textContent,'Tutto');assert.equal(h.media.paused,false);
+ assert.deepEqual(plain(h.api.payload().beats),before.beats);assert.equal(h.api.history.undo,0);
+ const fresh=boot([...h.storage]);assert.equal(fresh.$('language').value,'it');assert.equal(fresh.$('languagePrompt').hidden,true);
+ h.$('language').value='en';h.$('language').dispatch('change');assert.equal(h.$('fitView').textContent,'All');assert.equal(h.$('playButton').getAttribute('aria-label'),'Pause');
+ h.open(before);assert.equal(h.$('language').value,'en');assert.equal(h.$('beatCount').textContent,'3 beats');
+});
+
+test('range and additive selection can be edited using custom offset with one undo step',()=>{
+ const h=boot();h.open(project([1,1.5,2,2.5,3]));
+ h.api.selectBeat('b1');h.api.selectBeat('b3',false,{extend:true});assert.deepEqual(plain(h.api.state.selection),['b1','b2','b3']);
+ h.api.selectBeat('b2',false,{toggle:true});assert.deepEqual(plain(h.api.state.selection),['b1','b3']);assert.equal(h.$('bulkEditor').hidden,false);assert.equal(h.$('beatEditor').hidden,true);
+ h.$('offsetSelection').click();h.$('offsetMs').value='-10';h.$('offsetForm').dispatch('submit');
+ assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[1,1.49,2,2.49,3]);assert.equal(h.api.history.undo,1);
+ h.api.undo();assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[1,1.5,2,2.5,3]);h.api.redo();assert.equal(h.api.state.beats[1].time,1.49);
+});
+
+test('offset all keeps beat metadata and relative timing, follows section boundaries and survives reimport',()=>{
+ const h=boot();h.open(project([1,1.5,2,2.5,3],{sectionBoundaries:[2],beats:[1,1.5,2,2.5,3].map((time,i)=>({id:'b'+i,time,source:'auto',confidence:.3,inferred:true,fermataBefore:i===2,breakBefore:i===4}))}));
+ h.$('offsetButton').click();assert.equal(h.$('offsetScope').value,'all');h.$('offsetMs').value='37';h.$('offsetForm').dispatch('submit');
+ assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[1.037,1.537,2.037,2.537,3.037]);assert.deepEqual(plain(h.api.state.sectionBoundaries),[2.037]);
+ assert.equal(h.api.state.beats[2].fermataBefore,true);assert.equal(h.api.state.beats[4].breakBefore,true);assert.equal(h.api.state.beats[1].confidence,.3);assert.equal(h.api.state.beats[1].source,'auto');
+ const fresh=boot();fresh.open(plain(h.api.payload()));assert.deepEqual(plain(fresh.api.state.beats),plain(h.api.state.beats));
+});
+
+test('invalid bulk offsets are atomic: collision, reordering, boundaries, fractional input and invalid range',()=>{
+ const h=boot();h.open(project([0,.5,1,1.5,30]));h.api.selectBeat('b1');h.$('offsetButton').click();const original=plain(h.api.state.beats);
+ for(const value of ['500','600','-501','1.5','']){h.$('offsetMs').value=value;h.$('offsetForm').dispatch('submit');assert.equal(h.$('offsetError').hidden,false);assert.deepEqual(plain(h.api.state.beats),original);assert.equal(h.api.history.undo,0);}
+ h.$('offsetScope').value='all';h.$('offsetScope').dispatch('change');
+ for(const value of ['-10','10']){h.$('offsetMs').value=value;h.$('offsetForm').dispatch('submit');assert.deepEqual(plain(h.api.state.beats),original);assert.equal(h.api.history.undo,0);}
+ h.$('offsetScope').value='range';h.$('offsetScope').dispatch('change');h.$('offsetFrom').value='4';h.$('offsetTo').value='2';h.$('offsetForm').dispatch('submit');assert.deepEqual(plain(h.api.state.beats),original);
+ h.$('offsetFrom').value='2';h.$('offsetTo').value='4';h.$('offsetMs').value='10';h.$('offsetForm').dispatch('submit');assert.deepEqual(plain(h.api.state.beats.map(b=>b.time)),[0,.51,1.01,1.51,30]);
+});
+
+test('beat list supports checkboxes and selecting all across pages without requiring modifier keys',()=>{
+ const h=boot();h.open(project(Array.from({length:100},(_,i)=>i*.25)));h.$('beatListButton').click();
+ h.$('beatTable').children[1].children[0].children[0].dispatch('change');assert.deepEqual(plain(h.api.state.selection),['b1']);assert.equal(h.$('selectAllBeats').indeterminate,true);
+ h.$('selectAllBeats').checked=true;h.$('selectAllBeats').dispatch('change');assert.equal(h.api.state.selection.length,100);
+ h.$('nextPage').click();assert.ok(h.$('beatTable').children.every(row=>row.children[0].children[0].checked));
+ h.$('selectAllBeats').checked=false;h.$('selectAllBeats').dispatch('change');assert.equal(h.api.state.selection.length,0);assert.equal(h.api.state.selectedId,null);
 });

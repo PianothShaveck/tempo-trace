@@ -1,42 +1,38 @@
 # Tempo Trace
 
-Analisi del tempo musicale da audio/video. HTML, CSS e JavaScript senza dipendenze runtime o build; elaborazione sul dispositivo.
+Local audio/video tempo analysis. Static HTML, CSS and JavaScript; no build or runtime dependencies.
 
-## Sviluppo
+## Development
 
-Aprire `index.html` in un browser moderno. Test con Node.js:
+Open `index.html` in a modern browser. Run tests and refresh asset cache keys before committing:
 
 ```sh
 node --test tests/*.test.cjs
-```
-
-Prima di distribuire modifiche agli asset, aggiornare gli URL per invalidare la cache:
-
-```sh
 node scripts/version-assets.cjs
 ```
 
-Committare anche i file aggiornati dal comando. L’hosting serve direttamente la radice del repository.
+Commit the generated URL changes. Hosting serves the repository root.
 
-## Codice
+## Code
 
-- `assets/app.js`: stato, interfaccia, cronologia, import/export.
-- `assets/analysis.js`: BPM, sezioni, agogica; `analysis-worker.js` esegue le analisi più lunghe.
-- `assets/beat-detection.js`: attacchi spettrali, periodicità locale e tracciamento dei beat.
-- `assets/detection-client.js`: decodifica, cache PCM, Worker e annullamento.
-- `assets/charts.js`, `click-track.js`: grafici SVG e click di verifica.
-- `assets/report-export.js`: riepilogo SVG; `export-client.js` gestisce PNG, decodifica stereo e annullamento.
-- `assets/audio-export.js`: rendering WAV a blocchi in Worker. Il mix conserva velocità e intonazione originali; solo i click possono cambiare velocità.
+- `app.js`: state, history, UI and project import/export.
+- `i18n.js`: English/Italian UI and report messages. Italian source keys also translate worker errors; language preferences stay outside project data.
+- `analysis.js`, `analysis-worker.js`: BPM, sections and expression.
+- `beat-detection.js`, `detection-client.js`: spectral onsets, local periodicity, tracking, decoding and cancellation.
+- `charts.js`, `click-track.js`: SVG interaction and audition clicks.
+- `report-export.js`, `audio-export.js`, `export-client.js`: SVG/PNG reports and WAV rendering.
 
-## Vincoli
+All modules live in `assets/`.
 
-- Usare secondi della registrazione originale, indipendenti dalla velocità d’ascolto.
-- Conservare la compatibilità JSON v1, le correzioni manuali e l’annullamento.
-- `sectionBoundaries`: `null` usa l’analisi automatica; un array di secondi fissa i confini manuali (`[]` = una sezione). Le medie escludono le interruzioni anche dopo un’unione.
-- Distinguere fermate, interruzioni e beat interpolati. L’assenza di attacchi non prova una fermata: il rilevatore attuale può interrompere note lunghe regolarmente misurate.
-- Non equiparare il supporto euristico all’accuratezza. Per valutarla servono beat annotati; i test sintetici e il DOM simulato non sostituiscono il collaudo audio/browser.
-- Mantenere controlli accessibili, testi essenziali e nessun caricamento dell’audio su server.
+## Invariants
 
-## Riferimenti
+- Store original recording seconds, independent of playback speed. Keep JSON v1 compatibility and undo.
+- Bulk offsets preserve detection confidence, fermatas and gaps, move matching manual section boundaries, and reject invalid positions atomically.
+- `sectionBoundaries`: `null` for automatic detection; seconds array for manual boundaries (`[]` means one section). Means exclude gaps.
+- Fermatas, gaps and inferred beats are distinct. Missing onsets do not prove a fermata; the current detector may split sustained, regularly measured notes.
+- Heuristic support is not measured accuracy. Evaluation requires annotated beats; synthetic tests and the simulated DOM do not replace audio/browser checks.
+- Keep controls accessible, text minimal, and audio on the device.
 
-[Dynamic programming beat tracking](https://www.ee.columbia.edu/~dpwe/LabROSA/matlab/beat_simple/) · [Local periodicity for expressive piano](https://arxiv.org/abs/2308.10355). Implementazione originale; licenza MIT.
+## References
+
+[Dynamic programming beat tracking](https://www.ee.columbia.edu/~dpwe/LabROSA/matlab/beat_simple/) · [Local periodicity for expressive piano](https://arxiv.org/abs/2308.10355). Original implementation; MIT license.

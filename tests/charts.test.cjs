@@ -7,6 +7,7 @@ function harness(wave=false){
  svg.getScreenCTM=()=>({inverse:()=>({a:1,b:0,c:0,d:1,e:0,f:0})});
  svg.setPointerCapture=()=>{};svg.hasPointerCapture=()=>false;
  const context=vm.createContext({document,requestAnimationFrame:()=>1,cancelAnimationFrame(){}});
+ vm.runInContext(fs.readFileSync(require.resolve('../assets/i18n.js'),'utf8'),context);
  vm.runInContext(fs.readFileSync(require.resolve('../assets/charts.js'),'utf8'),context);
  const callbacks={onSeek:t=>calls.push(['seek',t]),onPan:view=>calls.push(['pan',view]),onSelectBeat:id=>calls.push(['select',id]),onMoveBeat:(...a)=>calls.push(['move',...a]),onInspectBeat:id=>calls.push(['inspect',id])};
  const chart=(wave?context.TempoCharts.createWaveform:context.TempoCharts.createTempoChart)(svg,callbacks);
@@ -59,4 +60,22 @@ test('a restart beat has a selectable square on the curve using the following in
  assert.equal(h.state.analysis.intervals.length,19);assert.ok(!h.state.analysis.intervals.some(p=>p.beatId==='10'));
  const marker=h.svg.querySelector('rect[data-anchor-beat="10"]');assert.ok(marker);const x=Number(marker.getAttribute('x'))+5,y=Number(marker.getAttribute('y'))+5;
  h.event('pointerdown',x,y);h.event('pointerup',x,y);assert.deepEqual(h.calls,[['select','10']]);
+});
+
+test('multiple beat selection is visible in the lane and never drags an individual beat',()=>{
+ const h=harness();h.state.selectedId='10';h.state.selectedIds=['8','9','10'];h.chart.render(h.state);
+ assert.equal(h.svg.querySelectorAll('rect[data-selected-beat]').length,3);
+ const x=49+5/10*733;h.event('pointerdown',x,370);h.event('pointermove',x+150,370);h.event('pointerup',x+150,370);
+ assert.ok(!h.calls.some(call=>call[0]==='move'));
+});
+
+test('modifier clicks forward selection intent and do not trigger drag or dense zoom',()=>{
+ const document=createDOM('<body><svg id="chart"></svg></body>'),svg=document.getElementById('chart'),context=vm.createContext({document}),calls=[];
+ vm.runInContext(fs.readFileSync(require.resolve('../assets/i18n.js'),'utf8'),context);vm.runInContext(fs.readFileSync(require.resolve('../assets/charts.js'),'utf8'),context);
+ svg.getBoundingClientRect=()=>({left:0,top:0,width:800,height:420});svg.getScreenCTM=()=>({inverse:()=>({a:1,b:0,c:0,d:1,e:0,f:0})});svg.setPointerCapture=()=>{};
+ const chart=context.TempoCharts.createTempoChart(svg,{onSelectBeat:(id,options)=>calls.push({id,...options}),onInspectBeat:()=>calls.push('zoom'),onMoveBeat:()=>calls.push('move')});
+ const beats=Array.from({length:1000},(_,i)=>({id:String(i),time:i*.5}));chart.render({beats,analysis:Analysis.analyze(beats),duration:500,viewStart:0,viewEnd:500,selectedId:'10'});
+ const x=49+5/500*733;
+ svg.dispatch('pointerdown',{button:0,pointerId:1,clientX:x,clientY:370,shiftKey:true,metaKey:true});svg.dispatch('pointerup',{pointerId:1,clientX:x,clientY:370});
+ assert.deepEqual(calls,[{id:'10',extend:true,toggle:true}]);
 });
